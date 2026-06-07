@@ -1,0 +1,2 @@
+# Nessuna dipendenza Python specifica per questo progetto.
+# Aggiungi qui eventuali pacchetti Python richiesti in futuro.

@@ -1,0 +1,1 @@
+USER_OBJS += ./Drivers/STM32H7xx_HAL_Driver/stm32h7xx_hal_dac.o ./Drivers/STM32H7xx_HAL_Driver/stm32h7xx_hal_dac_ex.o
