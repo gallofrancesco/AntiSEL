@@ -1,20 +1,29 @@
-# IDE and workspace files
+# STM32CubeIDE build output
+/Debug/
+/Release/
+**/Debug/
+**/Release/
+CM4/Debug/
+CM4/Release/
+CM7/Debug/
+CM7/Release/
+
+# Eclipse workspace metadata (NON i metadati di progetto)
+.metadata/
+
+# IDE user-specific (ok ignorarli)
 *.launch
 *.user
+
+# Altri toolchain
 *.uvproj*
 *.eww
-.settings/
-
-# STM32CubeIDE / Eclipse
-*.metadata/
-*.plugins/
-*.settings/
 
 # Misc
 Thumbs.db
 .DS_Store
 
-# Python environment
+# Python
 __pycache__/
 *.pyc
 *~
