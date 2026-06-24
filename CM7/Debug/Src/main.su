@@ -1,9 +1,0 @@
-../Src/main.c:83:5:main	32	static,ignoring_inline_asm
-../Src/main.c:198:6:SystemClock_Config	120	static
-../Src/main.c:262:6:SystemClock_Config_480MHz	120	static
-../Src/main.c:303:13:MPU_Config	24	static
-../Src/main.c:331:14:tcp_server_recv	72	static
-../Src/main.c:368:13:tcp_server_err	16	static
-../Src/main.c:373:14:tcp_server_accept	24	static
-../Src/main.c:390:13:TCP_Server_Init	8	static
-../Src/main.c:406:6:Error_Handler	8	static,ignoring_inline_asm
