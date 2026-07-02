@@ -1,8 +1,1 @@
-# DAC HAL driver - added manually
-Debug/Drivers/STM32H7xx_HAL_Driver/stm32h7xx_hal_dac.o: C:/Users/darthrooster/Documents/STM_Dev/AntiSEL/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_dac.c
-"C:/ST/STM32CubeIDE_2.1.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.win32_1.0.100.202602081740/tools/bin/arm-none-eabi-gcc.exe" "$<" -mcpu=cortex-m7 -std=gnu11 -g3 -DDEBUG -DCORE_CM7 -DUSE_HAL_DRIVER -DSTM32H755xx -DUSE_PWR_DIRECT_SMPS_SUPPLY -c -I../Inc -I../../Drivers/STM32H7xx_HAL_Driver/Inc -I../../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I../../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I../../Drivers/CMSIS/Include -O0 -ffunction-sections -fdata-sections -Wall --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -o "$@"
-
-Debug/Drivers/STM32H7xx_HAL_Driver/stm32h7xx_hal_dac_ex.o: C:/Users/darthrooster/Documents/STM_Dev/AntiSEL/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_dac_ex.c
-"C:/ST/STM32CubeIDE_2.1.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.win32_1.0.100.202602081740/tools/bin/arm-none-eabi-gcc.exe" "$<" -mcpu=cortex-m7 -std=gnu11 -g3 -DDEBUG -DCORE_CM7 -DUSE_HAL_DRIVER -DSTM32H755xx -DUSE_PWR_DIRECT_SMPS_SUPPLY -c -I../Inc -I../../Drivers/STM32H7xx_HAL_Driver/Inc -I../../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I../../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I../../Drivers/CMSIS/Include -O0 -ffunction-sections -fdata-sections -Wall --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -o "$@"
-
-AntiSEL_CM7.elf: Debug/Drivers/STM32H7xx_HAL_Driver/stm32h7xx_hal_dac.o Debug/Drivers/STM32H7xx_HAL_Driver/stm32h7xx_hal_dac_ex.o
+# Manual DAC build rules removed; the generated subdir.mk handles these sources.
