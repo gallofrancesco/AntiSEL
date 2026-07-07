@@ -84,11 +84,18 @@ Comandi (una riga per comando, terminata da CR/LF):
 - `THOLD_SET <ms>` / `TON_SET <ms>` — range 1.0–10.0 ms, risoluzione 0.1 ms (timing interno a 1 µs via TIM2)
 - `DUT_ON` / `DUT_OFF` — override manuale (R-07). `DUT_ON` riarma anche la protezione
 - `RESET` — riarma protezione e azzera contatori SEL/HCE
+- `TH_LOAD <1|2|3> <counts>` / `TH_SELECT <1|2|3>` / `TH_GET` — soglie precaricate (§8.2): 3 valori DAC caricati prima del run e selezionabili da PC; `DAC_SET` manuale disattiva la preset (STATUS riporta `TH=<n>`)
 
 Messaggi asincroni dal firmware:
 
 - `LOG_10HZ TICK=<ms> I=<raw16bit> FRESH=<0|1> STATE=<n> RETRY=<n> SEL=<n> HCE=<n>` ogni 100 ms (R-08)
 - Traccia evento (R-06): `TRACE_START <SEL|HCE> FS=<Sa/s> N=<campioni> THOLD_MS=<v> TON_MS=<v> DAC=<v> TICK=<ms>`, seguito da righe `indice,valore_raw` e da `TRACE_END`. La finestra copre pre-trigger (1 ms) + T_HOLD (+ T_ON per i SEL); ADC a 16 bit, 100 kSa/s (TIM6 → ADC1, buffer circolare DMA da 40 ms)
+
+File prodotti dalla GUI (nomenclatura §6.3, `<DUT_id>_<LET>_<run_id>_<timestamp>`):
+
+- `..._log10hz.csv` — log lento 10 Hz (R-08), un file per connessione
+- `..._events.csv` — override manuali e cambi parametri con timestamp (§5.3)
+- `..._trace_<SEL|HCE>.csv` — una traccia per evento, con metadati in testa
 
 ## Supporto e debugging
 

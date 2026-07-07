@@ -86,6 +86,11 @@ static volatile uint8_t sel_retry_count = 0;
 static uint32_t sel_count = 0; /* contatore eventi SEL (spec §5.2) */
 static uint32_t hce_count = 0; /* contatore eventi HCE (spec §5.2) */
 
+/* Soglie precaricate (spec §8.2): 3 valori DAC caricati prima del run
+ * e selezionabili da PC senza interventi hardware */
+static uint32_t th_preset[3] = {2048U, 2048U, 2048U};
+static uint8_t th_selected = 0; /* 0 = nessuna preset attiva, 1..3 */
+
 /* Allineato a 32 byte per la cache-maintenance (D-Cache attiva + DMA) */
 __attribute__((aligned(32))) static uint16_t adc_buffer[ADC_BUF_SIZE];
 static volatile uint8_t adc_running = 0;
@@ -657,9 +662,10 @@ static void handle_command(struct tcp_pcb *tpcb, char *line) {
   if (strncmp(line, "PING", 4) == 0) {
     tcp_write(tpcb, "PONG\r\n", 6, TCP_WRITE_FLAG_COPY);
   } else if (strncmp(line, "STATUS", 6) == 0) {
-    snprintf(buf, sizeof(buf), "OK STATUS=%s RETRY=%d SEL=%lu HCE=%lu\r\n",
+    snprintf(buf, sizeof(buf),
+             "OK STATUS=%s RETRY=%d SEL=%lu HCE=%lu TH=%u\r\n",
              state_names[antisel_state], (int)sel_retry_count,
-             (unsigned long)sel_count, (unsigned long)hce_count);
+             (unsigned long)sel_count, (unsigned long)hce_count, th_selected);
     tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
   } else if (strncmp(line, "DAC_GET", 7) == 0) {
     uint32_t val = HAL_DAC_GetValue(&hdac1, DAC_CHANNEL_1);
@@ -668,6 +674,7 @@ static void handle_command(struct tcp_pcb *tpcb, char *line) {
   } else if (strncmp(line, "DAC_SET", 7) == 0) {
     uint32_t val = (uint32_t)atoi(line + 8);
     if (val > 4095U) val = 4095U;
+    th_selected = 0; /* impostazione manuale: nessuna preset attiva */
     HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R, val);
     snprintf(buf, sizeof(buf), "DAC_SET=%lu\r\n", val);
     tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
@@ -686,6 +693,36 @@ static void handle_command(struct tcp_pcb *tpcb, char *line) {
     t_on_ms = v;
     snprintf(buf, sizeof(buf), "TON_SET=%d.%d\r\n", (int)t_on_ms,
              (int)(t_on_ms * 10.0f) % 10);
+    tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
+  } else if (strncmp(line, "TH_LOAD", 7) == 0) {
+    /* TH_LOAD <1|2|3> <counts> — carica una soglia preset (spec §8.2) */
+    int n = 0;
+    unsigned long v = 0;
+    if (sscanf(line + 7, "%d %lu", &n, &v) == 2 && n >= 1 && n <= 3) {
+      if (v > 4095UL) v = 4095UL;
+      th_preset[n - 1] = (uint32_t)v;
+      snprintf(buf, sizeof(buf), "TH_LOAD %d=%lu OK\r\n", n, v);
+    } else {
+      snprintf(buf, sizeof(buf), "TH_LOAD ERR\r\n");
+    }
+    tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
+  } else if (strncmp(line, "TH_SELECT", 9) == 0) {
+    /* TH_SELECT <1|2|3> — applica la soglia preset al DAC */
+    int n = atoi(line + 10);
+    if (n >= 1 && n <= 3) {
+      th_selected = (uint8_t)n;
+      HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R,
+                       th_preset[n - 1]);
+      snprintf(buf, sizeof(buf), "TH_SELECT=%d DAC=%lu\r\n", n,
+               (unsigned long)th_preset[n - 1]);
+    } else {
+      snprintf(buf, sizeof(buf), "TH_SELECT ERR\r\n");
+    }
+    tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
+  } else if (strncmp(line, "TH_GET", 6) == 0) {
+    snprintf(buf, sizeof(buf), "TH 1=%lu 2=%lu 3=%lu SEL=%u\r\n",
+             (unsigned long)th_preset[0], (unsigned long)th_preset[1],
+             (unsigned long)th_preset[2], th_selected);
     tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
   } else if (strncmp(line, "DUT_ON", 6) == 0) {
     /* Override manuale (R-07): riabilita ANCHE la protezione, altrimenti
