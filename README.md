@@ -62,6 +62,12 @@ STM32CubeIDE userà il codice rigenerato da `AntiSEL.ioc` e gestirà il toolchai
 - Apri `AntiSEL.ioc` con STM32CubeIDE o con STM32CubeMX.
 - Dopo aver modificato la configurazione, salva e rigenera il codice.
 
+## Configurazione di Rete (LwIP) e Memoria su STM32H7
+
+Su questo microcontrollore, l'Ethernet MAC DMA richiede che i buffer (RX/TX) e l'heap di LwIP si trovino in RAM_D2, un'area di memoria accessibile dal DMA.
+Nel progetto, per evitare sovrapposizioni critiche tra `RX_POOL` (che occupa memoria fino a `0x30004980`) e l'heap LwIP, il parametro `LWIP_RAM_HEAP_POINTER` è stato impostato all'indirizzo `0x30005000` (vedi `CM7/Inc/lwipopts.h`).
+È fondamentale non rimuovere questo puntatore o spostarlo in RAM_D1, altrimenti il modulo Ethernet MAC DMA smetterà di funzionare.
+
 ## Nota sui file di progetto
 
 - `AntiSEL.ioc` contiene la configurazione hardware e le opzioni del progetto.
