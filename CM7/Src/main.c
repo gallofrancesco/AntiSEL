@@ -572,8 +572,7 @@ static err_t tcp_server_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
   tcp_setprio(newpcb, TCP_PRIO_MIN);
   tcp_recv(newpcb, tcp_server_recv);
   tcp_err(newpcb, tcp_server_err);
-  tcp_write(newpcb, "AntiSEL v1.0\r\n", 14, TCP_WRITE_FLAG_COPY);
-  tcp_output(newpcb);
+  /* NON chiamare tcp_output o tcp_write qui dentro! Causa memory corruption in LwIP */
   return ERR_OK;
 }
 
