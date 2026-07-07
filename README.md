@@ -74,6 +74,22 @@ Nel progetto, per evitare sovrapposizioni critiche tra `RX_POOL` (che occupa mem
 - `CM7/makefile.defs`, `CM7/makefile.init`, `CM7/makefile.targets` sono makefile generati da CubeIDE/CubeMX e servono a gestire il build del progetto.
 - I file `.cproject` e `.settings/*` sono metadati dell’IDE e dovrebbero essere mantenuti solo se si desidera sincronizzare lo stesso ambiente di sviluppo tra macchine.
 
+## Protocollo TCP AntiSEL (porta 7755)
+
+Comandi (una riga per comando, terminata da CR/LF):
+
+- `PING` → `PONG`
+- `STATUS` → `OK STATUS=<IDLE|THOLD|TON|PERMANENT_OFF> RETRY=<n> SEL=<n> HCE=<n>`
+- `DAC_GET` / `DAC_SET <0-4095>` — soglia I_TH (DAC 12 bit sul pin LIMIT dell'INA301)
+- `THOLD_SET <ms>` / `TON_SET <ms>` — range 1.0–10.0 ms, risoluzione 0.1 ms (timing interno a 1 µs via TIM2)
+- `DUT_ON` / `DUT_OFF` — override manuale (R-07). `DUT_ON` riarma anche la protezione
+- `RESET` — riarma protezione e azzera contatori SEL/HCE
+
+Messaggi asincroni dal firmware:
+
+- `LOG_10HZ TICK=<ms> I=<raw16bit> FRESH=<0|1> STATE=<n> RETRY=<n> SEL=<n> HCE=<n>` ogni 100 ms (R-08)
+- Traccia evento (R-06): `TRACE_START <SEL|HCE> FS=<Sa/s> N=<campioni> THOLD_MS=<v> TON_MS=<v> DAC=<v> TICK=<ms>`, seguito da righe `indice,valore_raw` e da `TRACE_END`. La finestra copre pre-trigger (1 ms) + T_HOLD (+ T_ON per i SEL); ADC a 16 bit, 100 kSa/s (TIM6 → ADC1, buffer circolare DMA da 40 ms)
+
 ## Supporto e debugging
 
 - Se la build fallisce su un’altra macchina, il primo controllo è il toolchain: assicurati di usare lo stesso GCC di STM32CubeIDE.

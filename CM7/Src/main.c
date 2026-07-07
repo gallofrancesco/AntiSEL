@@ -21,15 +21,17 @@
 #include "adc.h"
 #include "dac.h"
 #include "dma.h"
-#include "gpio.h"
 #include "lwip.h"
 #include "usart.h"
+#include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "ethernetif.h" /* per ethernet_link_check_state() e gnetif */
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* USER CODE END Includes */
@@ -47,6 +49,16 @@
 #define HSEM_ID_0 (0U)
 #endif
 #endif
+
+/* ── Parametri acquisizione (R-06) ──────────────────────────────────────────
+ * ADC1 triggherato da TIM6 TRGO a 100 kSa/s (10 µs/campione).
+ * Buffer circolare da 40 ms: copre pre-trigger (>=1 ms) + T_HOLD max (10 ms)
+ * + T_ON max (10 ms) con ampio margine.
+ * -------------------------------------------------------------------------- */
+#define ADC_SAMPLE_RATE_HZ 100000U
+#define ADC_BUF_SIZE 4000U          /* 40 ms @ 100 kSa/s */
+#define TRACE_PRE_MS 1.0f           /* pre-trigger richiesto da spec §6.1 */
+#define SEL_RETRY_MAX 3U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -68,20 +80,28 @@ static float t_on_ms = 1.0f;
 typedef enum { STATE_IDLE = 0, STATE_THOLD, STATE_TON, STATE_PERMANENT_OFF } AntiSEL_State_t;
 
 static volatile AntiSEL_State_t antisel_state = STATE_IDLE;
-static volatile uint32_t antisel_timer_start = 0;
-static volatile uint8_t flag_send_trace = 0;
+static volatile uint32_t antisel_t0_us = 0;  /* riferimento TIM2 @ 1 MHz */
+static volatile uint8_t flag_send_trace = 0; /* 1 = SEL, 2 = HCE */
 static volatile uint8_t sel_retry_count = 0;
+static uint32_t sel_count = 0; /* contatore eventi SEL (spec §5.2) */
+static uint32_t hce_count = 0; /* contatore eventi HCE (spec §5.2) */
 
-#define ADC_BUF_SIZE 2000
-static uint16_t adc_buffer[ADC_BUF_SIZE];
+/* Allineato a 32 byte per la cache-maintenance (D-Cache attiva + DMA) */
+__attribute__((aligned(32))) static uint16_t adc_buffer[ADC_BUF_SIZE];
+static volatile uint8_t adc_running = 0;
 
-static uint16_t trace_send_index = 0;
+static uint32_t trace_len = 0;         /* n. campioni da inviare */
+static uint32_t trace_send_index = 0;
 static uint8_t  trace_is_sending = 0;
-static uint16_t trace_start_index = 0;
+static uint32_t trace_start_index = 0;
+static float    trace_thold_ms = 0.0f; /* snapshot parametri al freeze */
+static float    trace_ton_ms = 0.0f;
 
 /* Server TCP porta 7755 — AntiSEL Control Protocol */
 static struct tcp_pcb *tcp_server_pcb = NULL;
 static struct tcp_pcb *tcp_client_pcb = NULL;
+
+static const char *state_names[] = {"IDLE", "THOLD", "TON", "PERMANENT_OFF"};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -89,22 +109,117 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 void SystemClock_Config_480MHz(void);
 static void MPU_Config(void);
+static void MicroTimebase_Init(void);
+static void AdcTrigTimer_Init(void);
+static void ADC_ConfigTimerTriggered(void);
+static void ADC_Restart(void);
+static void Trace_Freeze(uint8_t event_type);
 static void TCP_Server_Init(void);
 static err_t tcp_server_accept(void *arg, struct tcp_pcb *newpcb, err_t err);
 static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p,
                              err_t err);
 static void tcp_server_err(void *arg, err_t err);
+static void handle_command(struct tcp_pcb *tpcb, char *line);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* Timebase a 1 µs (R-03/R-04: risoluzione richiesta <= 100 µs).
+ * TIM2 è a 32 bit: wrap ogni ~71 min, gestito con aritmetica unsigned. */
+static inline uint32_t micros(void) { return TIM2->CNT; }
+
+static void MicroTimebase_Init(void) {
+  __HAL_RCC_TIM2_CLK_ENABLE();
+  /* APB1 prescaler = /2 => clock timer = 2 x PCLK1 */
+  uint32_t tim_clk = HAL_RCC_GetPCLK1Freq() * 2U;
+  TIM2->PSC = (tim_clk / 1000000U) - 1U; /* 1 MHz */
+  TIM2->ARR = 0xFFFFFFFFU;
+  TIM2->EGR = TIM_EGR_UG;
+  TIM2->CR1 = TIM_CR1_CEN;
+}
+
+/* TIM6 genera TRGO (update) a 100 kHz per il pacing dell'ADC (R-06). */
+static void AdcTrigTimer_Init(void) {
+  __HAL_RCC_TIM6_CLK_ENABLE();
+  uint32_t tim_clk = HAL_RCC_GetPCLK1Freq() * 2U;
+  TIM6->PSC = 0U;
+  TIM6->ARR = (tim_clk / ADC_SAMPLE_RATE_HZ) - 1U;
+  TIM6->CR2 = TIM_CR2_MMS_1; /* MMS = 010: update -> TRGO */
+  TIM6->EGR = TIM_EGR_UG;
+  TIM6->CR1 = TIM_CR1_CEN;
+}
+
+/* Riconfigura l'ADC1 (inizializzato da CubeMX in free-run) in modalità
+ * timer-triggered: un campione per ogni TRGO di TIM6, DMA circolare.
+ * Fatto qui (e non in adc.c) per sopravvivere alla rigenerazione CubeMX. */
+static void ADC_ConfigTimerTriggered(void) {
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIG_T6_TRGO;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
+  hadc1.Init.ConversionDataManagement = ADC_CONVERSIONDATA_DMA_CIRCULAR;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK) {
+    Error_Handler();
+  }
+
+  /* Sampling time più lungo: a 100 kSa/s c'è ampio margine e migliora
+   * l'accuratezza a 16 bit (73 cicli ADC ~ 1.9 µs << 10 µs) */
+  sConfig.Channel = ADC_CHANNEL_15;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_64CYCLES_5;
+  sConfig.SingleDiff = ADC_SINGLE_ENDED;
+  sConfig.OffsetNumber = ADC_OFFSET_NONE;
+  sConfig.Offset = 0;
+  sConfig.OffsetSignedSaturation = DISABLE;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) {
+    Error_Handler();
+  }
+}
+
+static void ADC_Restart(void) {
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buffer, ADC_BUF_SIZE);
+  adc_running = 1;
+}
+
+/* Posizione di scrittura corrente del DMA nel buffer circolare */
+static inline uint32_t ADC_WritePos(void) {
+  return (ADC_BUF_SIZE - __HAL_DMA_GET_COUNTER(hadc1.DMA_Handle)) % ADC_BUF_SIZE;
+}
+
+/* Congela la traccia: ferma il DMA e calcola la finestra da inviare
+ * (pre-trigger + T_HOLD [+ T_ON per i SEL], spec §6.1).
+ * event_type: 1 = SEL, 2 = HCE. Se una traccia è già in invio (DMA fermo)
+ * la protezione resta attiva ma la nuova traccia viene persa. */
+static void Trace_Freeze(uint8_t event_type) {
+  if (!adc_running || trace_is_sending || flag_send_trace != 0) {
+    return; /* best-effort: non sovrascrivere una traccia in corso */
+  }
+  uint32_t write_pos = ADC_WritePos();
+  HAL_ADC_Stop_DMA(&hadc1);
+  adc_running = 0;
+  /* D-Cache attiva: invalida prima di leggere dati scritti dal DMA */
+  SCB_InvalidateDCache_by_Addr((uint32_t *)adc_buffer, sizeof(adc_buffer));
+
+  trace_thold_ms = t_hold_ms;
+  trace_ton_ms = (event_type == 1) ? t_on_ms : 0.0f;
+  float win_ms = TRACE_PRE_MS + trace_thold_ms + trace_ton_ms;
+  trace_len = (uint32_t)(win_ms * (ADC_SAMPLE_RATE_HZ / 1000.0f)) + 8U;
+  if (trace_len > ADC_BUF_SIZE) {
+    trace_len = ADC_BUF_SIZE;
+  }
+  trace_start_index = (write_pos + ADC_BUF_SIZE - trace_len) % ADC_BUF_SIZE;
+  flag_send_trace = event_type;
+}
 /* USER CODE END 0 */
 
 /**
- * @brief  The application entry point.
- * @retval int
- */
-int main(void) {
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
 
   /* USER CODE BEGIN 1 */
   MPU_Config();
@@ -113,7 +228,7 @@ int main(void) {
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
   int32_t timeout;
 #endif
-  /* USER CODE END Boot_Mode_Sequence_0 */
+/* USER CODE END Boot_Mode_Sequence_0 */
 
   /* Enable the CPU Cache */
 
@@ -132,11 +247,10 @@ int main(void) {
     Error_Handler();
   }
 #endif
-  /* USER CODE END Boot_Mode_Sequence_1 */
+/* USER CODE END Boot_Mode_Sequence_1 */
   /* MCU Configuration--------------------------------------------------------*/
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick.
-   */
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -156,7 +270,7 @@ int main(void) {
     Error_Handler();
   }
 #endif
-  /* USER CODE END Boot_Mode_Sequence_2 */
+/* USER CODE END Boot_Mode_Sequence_2 */
 
   /* USER CODE BEGIN SysInit */
   /* USER CODE END SysInit */
@@ -169,8 +283,13 @@ int main(void) {
   MX_DAC1_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
+  /* Timebase 1 µs per T_HOLD/T_ON (R-03/R-04, risoluzione <= 100 µs) */
+  MicroTimebase_Init();
+  /* ADC a 100 kSa/s triggherato da TIM6 (R-06) */
+  AdcTrigTimer_Init();
+  ADC_ConfigTimerTriggered();
   /* Avvia DMA dell'ADC per registrazione continua in background */
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buffer, ADC_BUF_SIZE);
+  ADC_Restart();
 
   /* Accendiamo LD2 per indicare che il sistema è avviato */
   HAL_GPIO_WritePin(LD2_YELLOW_GPIO_Port, LD2_YELLOW_Pin, GPIO_PIN_SET);
@@ -185,41 +304,44 @@ int main(void) {
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1) {
-    /* ── Macchina a stati AntiSEL (Polling non bloccante) ───────────────── */
+    /* ── Macchina a stati AntiSEL (Polling non bloccante, timebase 1 µs) ── */
     if (antisel_state == STATE_THOLD) {
-      if ((HAL_GetTick() - antisel_timer_start) >= (uint32_t)t_hold_ms) {
-        /* Tempo T_HOLD scaduto: controlliamo se l'ALERT (PC13) è ancora basso
-         */
-        if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET) {
-          /* Evento SEL Confermato! Sganciamo il DUT */
-          HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_RESET);
-          
-          /* Congeliamo la traccia che mostra il corto e la inviamo */
-          HAL_ADC_Stop_DMA(&hadc1);
-          flag_send_trace = 1; // 1 = SEL
-
+      if ((uint32_t)(micros() - antisel_t0_us) >=
+          (uint32_t)(t_hold_ms * 1000.0f)) {
+        /* Tempo T_HOLD scaduto: controlliamo se l'ALERT è ancora basso */
+        if (HAL_GPIO_ReadPin(INA301_ALERT_GPIO_Port, INA301_ALERT_Pin) ==
+            GPIO_PIN_RESET) {
+          /* Evento SEL Confermato! Sganciamo il DUT.
+           * NB: il DMA continua a girare per catturare anche il T_ON (R-06) */
+          HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin,
+                            GPIO_PIN_RESET);
           antisel_state = STATE_TON;
-          antisel_timer_start = HAL_GetTick();
+          antisel_t0_us = micros();
         } else {
-          /* Evento HCE (High Current Event), rientrato nel T_HOLD. Nessuno
-           * sgancio. */
-          HAL_ADC_Stop_DMA(&hadc1); // Congeliamo la traccia dell'HCE
-          flag_send_trace = 2; // 2 = HCE
-          
-          sel_retry_count = 0; // Se è un HCE, azzeriamo il counter dei fallimenti
+          /* Evento HCE (High Current Event), rientrato nel T_HOLD.
+           * Nessuno sgancio. */
+          hce_count++;
+          sel_retry_count = 0; /* HCE: azzeriamo il counter dei fallimenti */
+          Trace_Freeze(2);     /* 2 = HCE */
           antisel_state = STATE_IDLE;
         }
       }
     } else if (antisel_state == STATE_TON) {
-      if ((HAL_GetTick() - antisel_timer_start) >= (uint32_t)t_on_ms) {
-        /* Tempo T_ON scaduto: Gestiamo i 3 tentativi di riarmo */
-        if (sel_retry_count < 3) {
+      if ((uint32_t)(micros() - antisel_t0_us) >=
+          (uint32_t)(t_on_ms * 1000.0f)) {
+        /* Tempo T_ON scaduto: la traccia ora copre pre + T_HOLD + T_ON */
+        sel_count++;
+        Trace_Freeze(1); /* 1 = SEL */
+        /* Gestiamo i tentativi di riarmo */
+        if (sel_retry_count < SEL_RETRY_MAX) {
           sel_retry_count++;
-          /* IMPORTANT: impostare lo stato PRIMA di riaccendere il DUT per evitare race condition con l'EXTI */
-          antisel_state = STATE_IDLE; 
-          HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_SET);
+          /* IMPORTANT: impostare lo stato PRIMA di riaccendere il DUT per
+           * evitare race condition con l'EXTI */
+          antisel_state = STATE_IDLE;
+          HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin,
+                            GPIO_PIN_SET);
         } else {
-          /* 3 tentativi falliti. Il DUT rimane spento definitivamente. */
+          /* Tentativi esauriti. Il DUT rimane spento definitivamente. */
           antisel_state = STATE_PERMANENT_OFF;
         }
       }
@@ -232,63 +354,72 @@ int main(void) {
     MX_LWIP_Process();
 
     /* ── Invio Traccia DMA ────────────────────────────────────────────────
-     * Se è stata richiesta la traccia, la inviamo al client (se connesso).
+     * Header con metadati (R-06): tipo evento, sample rate, n. campioni,
+     * parametri configurati e tick. Poi righe "indice,valore".
      * --------------------------------------------------------------------- */
-    if (flag_send_trace > 0) {
+    if (flag_send_trace > 0 && !trace_is_sending) {
       uint8_t event_type = flag_send_trace;
       flag_send_trace = 0;
-      
-      // Calcola l'indice del dato più vecchio (dove il DMA avrebbe scritto il prossimo campione)
-      trace_start_index = ADC_BUF_SIZE - __HAL_DMA_GET_COUNTER(hadc1.DMA_Handle);
-      trace_send_index = 0;
 
       if (tcp_client_pcb != NULL) {
-        if (event_type == 1) {
-            tcp_write(tcp_client_pcb, "TRACE_START SEL\r\n", 17, TCP_WRITE_FLAG_COPY);
-        } else {
-            tcp_write(tcp_client_pcb, "TRACE_START HCE\r\n", 17, TCP_WRITE_FLAG_COPY);
-        }
+        char hdr[128];
+        int hl = snprintf(hdr, sizeof(hdr),
+                          "TRACE_START %s FS=%lu N=%lu THOLD_MS=%d.%d "
+                          "TON_MS=%d.%d DAC=%lu TICK=%lu\r\n",
+                          (event_type == 1) ? "SEL" : "HCE",
+                          (unsigned long)ADC_SAMPLE_RATE_HZ,
+                          (unsigned long)trace_len, (int)trace_thold_ms,
+                          (int)(trace_thold_ms * 10.0f) % 10, (int)trace_ton_ms,
+                          (int)(trace_ton_ms * 10.0f) % 10,
+                          (unsigned long)HAL_DAC_GetValue(&hdac1,
+                                                          DAC_CHANNEL_1),
+                          (unsigned long)HAL_GetTick());
+        tcp_write(tcp_client_pcb, hdr, hl, TCP_WRITE_FLAG_COPY);
         tcp_output(tcp_client_pcb);
+        trace_send_index = 0;
         trace_is_sending = 1;
       } else {
-        // Se non c'è un client, riavvia subito il DMA
-        HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buffer, ADC_BUF_SIZE);
+        /* Se non c'è un client, riavvia subito il DMA */
+        ADC_Restart();
       }
     }
 
     if (trace_is_sending) {
       if (tcp_client_pcb != NULL) {
-        uint16_t chunk_size = 40; // Spediamo max 40 campioni per ciclo per non intasare LwIP
-        char buf[512] = {0};
+        /* Max 40 campioni per ciclo per non intasare LwIP */
+        uint32_t saved_index = trace_send_index;
+        char buf[640] = {0};
         int len = 0;
-        
-        for(int i = 0; i < chunk_size && trace_send_index < ADC_BUF_SIZE; i++) {
-          uint16_t idx = (trace_start_index + trace_send_index) % ADC_BUF_SIZE;
-          len += snprintf(buf + len, sizeof(buf) - len, "%u\r\n", adc_buffer[idx]);
+
+        for (int i = 0; i < 40 && trace_send_index < trace_len; i++) {
+          uint32_t idx =
+              (trace_start_index + trace_send_index) % ADC_BUF_SIZE;
+          len += snprintf(buf + len, sizeof(buf) - len, "%lu,%u\r\n",
+                          (unsigned long)trace_send_index, adc_buffer[idx]);
           trace_send_index++;
         }
-        
-        // Se c'è spazio nel buffer TCP SND, inviamo il chunk
-        if (tcp_sndbuf(tcp_client_pcb) >= len) {
+
+        /* Se c'è spazio nel buffer TCP SND, inviamo il chunk */
+        if (tcp_sndbuf(tcp_client_pcb) >= (u16_t)len) {
           tcp_write(tcp_client_pcb, buf, len, TCP_WRITE_FLAG_COPY);
           tcp_output(tcp_client_pcb);
         } else {
-          // Fallback, riproveremo il chunk al prossimo giro
-          trace_send_index -= chunk_size;
+          /* Fallback: riproveremo lo stesso chunk al prossimo giro */
+          trace_send_index = saved_index;
         }
-        
-        if (trace_send_index >= ADC_BUF_SIZE) {
+
+        if (trace_send_index >= trace_len) {
           tcp_write(tcp_client_pcb, "TRACE_END\r\n", 11, TCP_WRITE_FLAG_COPY);
           tcp_output(tcp_client_pcb);
           trace_is_sending = 0;
-          
-          // Traccia finita: Riavvia il DMA per i prossimi eventi!
-          HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buffer, ADC_BUF_SIZE);
+
+          /* Traccia finita: riavvia il DMA per i prossimi eventi! */
+          ADC_Restart();
         }
       } else {
-        // Disconnesso improvvisamente
+        /* Disconnesso improvvisamente */
         trace_is_sending = 0;
-        HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buffer, ADC_BUF_SIZE);
+        ADC_Restart();
       }
     }
 
@@ -317,18 +448,32 @@ int main(void) {
       HAL_GPIO_TogglePin(LD1_GREEN_GPIO_Port, LD1_GREEN_Pin);
     }
 
-    /* ── LOG_10HZ (ogni 100 ms) ──────────────────────────────────────────
-     * Invia periodicamente un log 10Hz al client se connesso.
-     * Legge anche l'ultimo valore disponibile dall'ADC.
+    /* ── LOG_10HZ (ogni 100 ms, R-08) ─────────────────────────────────────
+     * Invia l'ULTIMO campione scritto dal DMA (non un campione arbitrario)
+     * più stato, retry e contatori SEL/HCE. FRESH=0 se il DMA è fermo
+     * (traccia in invio) e il dato è quindi stantio.
      * --------------------------------------------------------------------- */
     if (HAL_GetTick() - last_log_10hz >= 100U) {
       last_log_10hz = HAL_GetTick();
-        if (tcp_client_pcb != NULL) {
-          char buf[80];
-          /* Preleviamo un campione a caso dal buffer circolare dell'ADC */
-          uint16_t adc_val = adc_buffer[0];
-          snprintf(buf, sizeof(buf), "LOG_10HZ TICK=%lu I=%u STATE=%d RETRY=%d\r\n", HAL_GetTick(),
-                   adc_val, (int)antisel_state, (int)sel_retry_count);
+      if (tcp_client_pcb != NULL) {
+        char buf[128];
+        uint16_t adc_val;
+        uint8_t fresh = adc_running;
+        if (adc_running) {
+          uint32_t idx = (ADC_WritePos() + ADC_BUF_SIZE - 1U) % ADC_BUF_SIZE;
+          /* Invalida la sola cache line che contiene il campione */
+          uint32_t addr = ((uint32_t)&adc_buffer[idx]) & ~31U;
+          SCB_InvalidateDCache_by_Addr((uint32_t *)addr, 32);
+          adc_val = adc_buffer[idx];
+        } else {
+          adc_val = adc_buffer[0];
+        }
+        snprintf(buf, sizeof(buf),
+                 "LOG_10HZ TICK=%lu I=%u FRESH=%u STATE=%d RETRY=%d SEL=%lu "
+                 "HCE=%lu\r\n",
+                 HAL_GetTick(), adc_val, fresh, (int)antisel_state,
+                 (int)sel_retry_count, (unsigned long)sel_count,
+                 (unsigned long)hce_count);
         if (tcp_sndbuf(tcp_client_pcb) >= strlen(buf)) {
           tcp_write(tcp_client_pcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
           tcp_output(tcp_client_pcb);
@@ -344,27 +489,27 @@ int main(void) {
 }
 
 /**
- * @brief System Clock Configuration
- * @retval None
- */
-void SystemClock_Config(void) {
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
   /** Supply configuration update enable
-   */
+  */
   HAL_PWREx_ConfigSupply(PWR_DIRECT_SMPS_SUPPLY);
 
   /** Configure the main internal regulator output voltage
-   */
+  */
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
 
-  while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {
-  }
+  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
   /** Initializes the RCC Oscillators according to the specified parameters
-   * in the RCC_OscInitTypeDef structure.
-   */
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -377,15 +522,16 @@ void SystemClock_Config(void) {
   RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOMEDIUM;
   RCC_OscInitStruct.PLL.PLLFRACN = 6144;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
     Error_Handler();
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
-   */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
-                                RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 |
-                                RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
+                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
@@ -394,7 +540,8 @@ void SystemClock_Config(void) {
   RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
   RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK) {
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  {
     Error_Handler();
   }
 }
@@ -407,7 +554,7 @@ void SystemClock_Config(void) {
  * @retval None
  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-  if (GPIO_Pin == GPIO_PIN_13) {
+  if (GPIO_Pin == INA301_ALERT_Pin) {
     /* È scattato l'allarme (o hai premuto il bottone blu!) */
     if (antisel_state == STATE_IDLE) {
       /*
@@ -416,9 +563,9 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
        * HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin,
        * GPIO_PIN_RESET);
        */
-      
+
       antisel_state = STATE_THOLD;
-      antisel_timer_start = HAL_GetTick();
+      antisel_t0_us = micros();
     }
   }
 }
@@ -501,58 +648,101 @@ static void MPU_Config(void) {
 
 /* Server TCP porta 7755 — AntiSEL Control Protocol */
 
-static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p,
-                             err_t err) {
-  if (p == NULL) {
-    tcp_client_pcb = NULL;
-    tcp_close(tpcb);
-    return ERR_OK;
-  }
-  char *data = (char *)p->payload;
-  if (strncmp(data, "PING", 4) == 0)
+/**
+ * @brief  Esegue un singolo comando (una riga, senza CR/LF).
+ */
+static void handle_command(struct tcp_pcb *tpcb, char *line) {
+  char buf[96];
+
+  if (strncmp(line, "PING", 4) == 0) {
     tcp_write(tpcb, "PONG\r\n", 6, TCP_WRITE_FLAG_COPY);
-  else if (strncmp(data, "STATUS", 6) == 0)
-    tcp_write(tpcb, "OK STATUS=IDLE\r\n", 16, TCP_WRITE_FLAG_COPY);
-  else if (strncmp(data, "DAC_GET", 7) == 0) {
+  } else if (strncmp(line, "STATUS", 6) == 0) {
+    snprintf(buf, sizeof(buf), "OK STATUS=%s RETRY=%d SEL=%lu HCE=%lu\r\n",
+             state_names[antisel_state], (int)sel_retry_count,
+             (unsigned long)sel_count, (unsigned long)hce_count);
+    tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
+  } else if (strncmp(line, "DAC_GET", 7) == 0) {
     uint32_t val = HAL_DAC_GetValue(&hdac1, DAC_CHANNEL_1);
-    char buf[32];
     snprintf(buf, sizeof(buf), "DAC=%lu\r\n", val);
     tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
-  } else if (strncmp(data, "DAC_SET", 7) == 0) {
-    uint32_t val = atoi(data + 8);
+  } else if (strncmp(line, "DAC_SET", 7) == 0) {
+    uint32_t val = (uint32_t)atoi(line + 8);
+    if (val > 4095U) val = 4095U;
     HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R, val);
-    char buf[32];
     snprintf(buf, sizeof(buf), "DAC_SET=%lu\r\n", val);
     tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
-  } else if (strncmp(data, "THOLD_SET", 9) == 0) {
-    t_hold_ms = atof(data + 10);
-    char buf[32];
-    int val_i = (int)t_hold_ms;
-    int val_d = (int)(t_hold_ms * 10) % 10;
-    snprintf(buf, sizeof(buf), "THOLD_SET=%d.%d\r\n", val_i, val_d);
+  } else if (strncmp(line, "THOLD_SET", 9) == 0) {
+    float v = (float)atof(line + 10);
+    if (v < 1.0f) v = 1.0f;       /* range spec R-03: 1–10 ms */
+    if (v > 10.0f) v = 10.0f;
+    t_hold_ms = v;
+    snprintf(buf, sizeof(buf), "THOLD_SET=%d.%d\r\n", (int)t_hold_ms,
+             (int)(t_hold_ms * 10.0f) % 10);
     tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
-  } else if (strncmp(data, "TON_SET", 7) == 0) {
-    t_on_ms = atof(data + 8);
-    char buf[32];
-    int val_i = (int)t_on_ms;
-    int val_d = (int)(t_on_ms * 10) % 10;
-    snprintf(buf, sizeof(buf), "TON_SET=%d.%d\r\n", val_i, val_d);
+  } else if (strncmp(line, "TON_SET", 7) == 0) {
+    float v = (float)atof(line + 8);
+    if (v < 1.0f) v = 1.0f;       /* range spec R-04: 1–10 ms */
+    if (v > 10.0f) v = 10.0f;
+    t_on_ms = v;
+    snprintf(buf, sizeof(buf), "TON_SET=%d.%d\r\n", (int)t_on_ms,
+             (int)(t_on_ms * 10.0f) % 10);
     tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
-  } else if (strncmp(data, "DUT_ON", 6) == 0) {
-    HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_SET);
-    tcp_write(tpcb, "DUT_ON OK\r\n", 11, TCP_WRITE_FLAG_COPY);
-  } else if (strncmp(data, "DUT_OFF", 7) == 0) {
-    HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_RESET);
-    antisel_state = STATE_PERMANENT_OFF;
-    tcp_write(tpcb, "DUT_OFF OK\r\n", 12, TCP_WRITE_FLAG_COPY);
-  } else if (strncmp(data, "RESET", 5) == 0) {
+  } else if (strncmp(line, "DUT_ON", 6) == 0) {
+    /* Override manuale (R-07): riabilita ANCHE la protezione, altrimenti
+     * dopo un DUT_OFF lo stato resterebbe PERMANENT_OFF e l'EXTI (che arma
+     * solo da IDLE) non proteggerebbe più il DUT. */
     sel_retry_count = 0;
     antisel_state = STATE_IDLE;
     HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_SET);
+    tcp_write(tpcb, "DUT_ON OK\r\n", 11, TCP_WRITE_FLAG_COPY);
+  } else if (strncmp(line, "DUT_OFF", 7) == 0) {
+    HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_RESET);
+    antisel_state = STATE_PERMANENT_OFF;
+    tcp_write(tpcb, "DUT_OFF OK\r\n", 12, TCP_WRITE_FLAG_COPY);
+  } else if (strncmp(line, "RESET", 5) == 0) {
+    sel_retry_count = 0;
+    sel_count = 0;
+    hce_count = 0;
+    antisel_state = STATE_IDLE;
+    HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_SET);
     tcp_write(tpcb, "RESET OK\r\n", 10, TCP_WRITE_FLAG_COPY);
-  } else
+  } else {
     tcp_write(tpcb, "ACK\r\n", 5, TCP_WRITE_FLAG_COPY);
-    
+  }
+}
+
+static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p,
+                             err_t err) {
+  /* Parsing line-based: gestisce comandi multipli nello stesso segmento
+   * e comandi frammentati su più segmenti (es. flood di DAC_SET) */
+  static char line_buf[64];
+  static uint8_t line_len = 0;
+
+  if (p == NULL) {
+    tcp_client_pcb = NULL;
+    line_len = 0;
+    tcp_close(tpcb);
+    return ERR_OK;
+  }
+
+  for (struct pbuf *q = p; q != NULL; q = q->next) {
+    const char *d = (const char *)q->payload;
+    for (u16_t i = 0; i < q->len; i++) {
+      char c = d[i];
+      if (c == '\n' || c == '\r') {
+        if (line_len > 0) {
+          line_buf[line_len] = '\0';
+          handle_command(tpcb, line_buf);
+          line_len = 0;
+        }
+      } else if (line_len < sizeof(line_buf) - 1) {
+        line_buf[line_len++] = c;
+      } else {
+        line_len = 0; /* riga troppo lunga: scartata */
+      }
+    }
+  }
+
   tcp_recved(tpcb, p->tot_len);
   pbuf_free(p);
   return ERR_OK;
@@ -590,10 +780,11 @@ static void TCP_Server_Init(void) {
 /* USER CODE END 4 */
 
 /**
- * @brief  This function is executed in case of error occurrence.
- * @retval None
- */
-void Error_Handler(void) {
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
   /* USER CODE BEGIN Error_Handler_Debug */
   __disable_irq();
   /* Accendi LD3 rosso per segnalare errore */
@@ -604,13 +795,14 @@ void Error_Handler(void) {
 }
 #ifdef USE_FULL_ASSERT
 /**
- * @brief  Reports the name of the source file and the source line number
- *         where the assert_param error has occurred.
- * @param  file: pointer to the source file name
- * @param  line: assert_param error line source number
- * @retval None
- */
-void assert_failed(uint8_t *file, uint32_t line) {
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
   /* USER CODE BEGIN 6 */
   /* USER CODE END 6 */
 }
