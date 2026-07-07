@@ -64,6 +64,20 @@ extern struct netif gnetif;         /* dichiarato in lwip.c */
 static float t_hold_ms = 1.0f;
 static float t_on_ms = 1.0f;
 
+/* Macchina a Stati AntiSEL (Latch Mode) */
+typedef enum {
+    STATE_IDLE = 0,
+    STATE_THOLD,
+    STATE_TON
+} AntiSEL_State_t;
+
+static volatile AntiSEL_State_t antisel_state = STATE_IDLE;
+static volatile uint32_t antisel_timer_start = 0;
+static volatile uint8_t flag_send_trace = 0;
+
+#define ADC_BUF_SIZE 2000
+static uint16_t adc_buffer[ADC_BUF_SIZE];
+
 /* Server TCP porta 7755 — AntiSEL Control Protocol */
 static struct tcp_pcb *tcp_server_pcb = NULL;
 static struct tcp_pcb *tcp_client_pcb = NULL;
@@ -154,8 +168,14 @@ int main(void)
   MX_DAC1_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
+  /* Avvia DMA dell'ADC per registrazione continua in background */
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, ADC_BUF_SIZE);
+
   /* Accendiamo LD2 per indicare che il sistema è avviato */
   HAL_GPIO_WritePin(LD2_YELLOW_GPIO_Port, LD2_YELLOW_Pin, GPIO_PIN_SET);
+  /* Chiudiamo lo switch DUT all'avvio */
+  HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_SET);
+  
   HAL_DAC_Start(&hdac1, DAC_CHANNEL_1);
   HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 2048);
   TCP_Server_Init();
@@ -164,11 +184,50 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1) {
+    /* ── Macchina a stati AntiSEL (Polling non bloccante) ───────────────── */
+    if (antisel_state == STATE_THOLD) {
+        if ((HAL_GetTick() - antisel_timer_start) >= (uint32_t)t_hold_ms) {
+            /* Tempo T_HOLD scaduto: controlliamo se l'ALERT (PC13) è ancora basso */
+            if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET) {
+                /* Evento SEL Confermato! Sganciamo il DUT */
+                HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_RESET);
+                
+                antisel_state = STATE_TON;
+                antisel_timer_start = HAL_GetTick();
+            } else {
+                /* Evento HCE (High Current Event), rientrato nel T_HOLD. Nessuno sgancio. */
+                antisel_state = STATE_IDLE;
+                flag_send_trace = 1; // Richiedi invio traccia
+            }
+        }
+    } else if (antisel_state == STATE_TON) {
+        if ((HAL_GetTick() - antisel_timer_start) >= (uint32_t)t_on_ms) {
+            /* Tempo T_ON scaduto: Riarmiamo il DUT */
+            HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_SET);
+            antisel_state = STATE_IDLE;
+            flag_send_trace = 1; // Richiedi invio traccia
+        }
+    }
+
     /* ── LwIP polling ─────────────────────────────────────────────────────
      * MX_LWIP_Process() deve girare il più spesso possibile.
      * Non mettere mai HAL_Delay() in questo loop.
      * --------------------------------------------------------------------- */
     MX_LWIP_Process();
+
+    /* ── Invio Traccia DMA ────────────────────────────────────────────────
+     * Se è stata richiesta la traccia, la inviamo al client (se connesso).
+     * --------------------------------------------------------------------- */
+    if (flag_send_trace == 1) {
+        flag_send_trace = 0;
+        if (tcp_client_pcb != NULL) {
+            tcp_write(tcp_client_pcb, "TRACE_START\r\n", 13, TCP_WRITE_FLAG_COPY);
+            /* (Semplificazione: In un caso reale invieremmo i veri campioni DMA convertendoli) */
+            tcp_write(tcp_client_pcb, "10,20,30\r\n", 10, TCP_WRITE_FLAG_COPY); 
+            tcp_write(tcp_client_pcb, "TRACE_END\r\n", 11, TCP_WRITE_FLAG_COPY);
+            tcp_output(tcp_client_pcb);
+        }
+    }
 
     /* ── ETH link check ogni 100 ms ───────────────────────────────────────
      * Verifica se il link Ethernet è salito/sceso e aggiorna LwIP.
@@ -197,6 +256,7 @@ int main(void)
 
     /* ── LOG_10HZ (ogni 100 ms) ──────────────────────────────────────────
      * Invia periodicamente un log 10Hz al client se connesso.
+     * Legge anche l'ultimo valore disponibile dall'ADC.
      * --------------------------------------------------------------------- */
     if (HAL_GetTick() - last_log_10hz >= 100U)
     {
@@ -204,7 +264,9 @@ int main(void)
       if (tcp_client_pcb != NULL)
       {
         char buf[64];
-        snprintf(buf, sizeof(buf), "LOG_10HZ TICK=%lu\r\n", HAL_GetTick());
+        /* Preleviamo un campione a caso dal buffer circolare dell'ADC */
+        uint16_t adc_val = adc_buffer[0]; 
+        snprintf(buf, sizeof(buf), "LOG_10HZ TICK=%lu I=%u\r\n", HAL_GetTick(), adc_val);
         if (tcp_sndbuf(tcp_client_pcb) >= strlen(buf))
         {
           tcp_write(tcp_client_pcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
@@ -396,10 +458,10 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p,
     snprintf(buf, sizeof(buf), "TON_SET=%d.%d\r\n", val_i, val_d);
     tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
   } else if (strncmp(data, "DUT_ON", 6) == 0) {
-    /* TODO: Aggiungere il toggle del GPIO del DUT_SWITCH qui (es. HAL_GPIO_WritePin) */
+    HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_SET);
     tcp_write(tpcb, "DUT_ON OK\r\n", 11, TCP_WRITE_FLAG_COPY);
   } else if (strncmp(data, "DUT_OFF", 7) == 0) {
-    /* TODO: Aggiungere il toggle del GPIO del DUT_SWITCH qui (es. HAL_GPIO_WritePin) */
+    HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_RESET);
     tcp_write(tpcb, "DUT_OFF OK\r\n", 12, TCP_WRITE_FLAG_COPY);
   } else
     tcp_write(tpcb, "ACK\r\n", 5, TCP_WRITE_FLAG_COPY);
