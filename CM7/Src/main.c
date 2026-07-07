@@ -552,7 +552,7 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p,
     tcp_write(tpcb, "RESET OK\r\n", 10, TCP_WRITE_FLAG_COPY);
   } else
     tcp_write(tpcb, "ACK\r\n", 5, TCP_WRITE_FLAG_COPY);
-  tcp_output(tpcb);
+    
   tcp_recved(tpcb, p->tot_len);
   pbuf_free(p);
   return ERR_OK;
