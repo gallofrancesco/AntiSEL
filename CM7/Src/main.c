@@ -75,6 +75,10 @@ static volatile uint8_t sel_retry_count = 0;
 #define ADC_BUF_SIZE 2000
 static uint16_t adc_buffer[ADC_BUF_SIZE];
 
+static uint16_t trace_send_index = 0;
+static uint8_t  trace_is_sending = 0;
+static uint16_t trace_start_index = 0;
+
 /* Server TCP porta 7755 — AntiSEL Control Protocol */
 static struct tcp_pcb *tcp_server_pcb = NULL;
 static struct tcp_pcb *tcp_client_pcb = NULL;
@@ -189,16 +193,21 @@ int main(void) {
         if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET) {
           /* Evento SEL Confermato! Sganciamo il DUT */
           HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_RESET);
+          
+          /* Congeliamo la traccia che mostra il corto e la inviamo */
+          HAL_ADC_Stop_DMA(&hadc1);
+          flag_send_trace = 1; // 1 = SEL
 
           antisel_state = STATE_TON;
           antisel_timer_start = HAL_GetTick();
         } else {
           /* Evento HCE (High Current Event), rientrato nel T_HOLD. Nessuno
            * sgancio. */
-          antisel_state = STATE_IDLE;
-          sel_retry_count = 0; // Se è un HCE, azzeriamo il counter dei fallimenti
-          HAL_ADC_Stop_DMA(&hadc1); // Ferma l'acquisizione ora per congelare la traccia dell'HCE
+          HAL_ADC_Stop_DMA(&hadc1); // Congeliamo la traccia dell'HCE
           flag_send_trace = 2; // 2 = HCE
+          
+          sel_retry_count = 0; // Se è un HCE, azzeriamo il counter dei fallimenti
+          antisel_state = STATE_IDLE;
         }
       }
     } else if (antisel_state == STATE_TON) {
@@ -206,15 +215,12 @@ int main(void) {
         /* Tempo T_ON scaduto: Gestiamo i 3 tentativi di riarmo */
         if (sel_retry_count < 3) {
           sel_retry_count++;
+          /* IMPORTANT: impostare lo stato PRIMA di riaccendere il DUT per evitare race condition con l'EXTI */
+          antisel_state = STATE_IDLE; 
           HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_SET);
-          antisel_state = STATE_IDLE;
-          HAL_ADC_Stop_DMA(&hadc1); // Ferma l'acquisizione per congelare la traccia del SEL
-          flag_send_trace = 1; // 1 = SEL
         } else {
           /* 3 tentativi falliti. Il DUT rimane spento definitivamente. */
           antisel_state = STATE_PERMANENT_OFF;
-          HAL_ADC_Stop_DMA(&hadc1);
-          flag_send_trace = 1; 
         }
       }
     }
@@ -558,8 +564,9 @@ static err_t tcp_server_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
   if (err != ERR_OK || newpcb == NULL)
     return ERR_VAL;
   if (tcp_client_pcb != NULL) {
-    tcp_abort(newpcb);
-    return ERR_ABRT;
+    /* Abortiamo la VECCHIA connessione "fantasma" per far posto alla nuova */
+    tcp_abort(tcp_client_pcb);
+    tcp_client_pcb = NULL;
   }
   tcp_client_pcb = newpcb;
   tcp_setprio(newpcb, TCP_PRIO_MIN);
