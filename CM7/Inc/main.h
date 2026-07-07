@@ -57,6 +57,11 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define INA301_ALERT_Pin GPIO_PIN_13
+#define INA301_ALERT_GPIO_Port GPIOC
+#define INA301_ALERT_EXTI_IRQn EXTI15_10_IRQn
+#define INA301_OUT_Pin GPIO_PIN_3
+#define INA301_OUT_GPIO_Port GPIOA
 #define LD1_GREEN_Pin GPIO_PIN_0
 #define LD1_GREEN_GPIO_Port GPIOB
 #define LD3_RED_Pin GPIO_PIN_14
