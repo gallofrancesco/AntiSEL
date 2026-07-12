@@ -59,11 +59,23 @@ void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD2_YELLOW_GPIO_Port, LD2_YELLOW_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : INA301_ALERT_Pin */
+  /* INA301_RST a riposo HIGH = comparatore INA301 in modo LATCHED */
+  HAL_GPIO_WritePin(INA301_RST_GPIO_Port, INA301_RST_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin : INA301_ALERT_Pin (PE13 = Arduino D3, EXTI13, pull-up
+    per ALARM open-drain attivo-basso) */
   GPIO_InitStruct.Pin = INA301_ALERT_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(INA301_ALERT_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : INA301_RST_Pin (PE14 = Arduino D4): reset del latch,
+    output push-pull, riposo HIGH = modo latched */
+  GPIO_InitStruct.Pin = INA301_RST_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(INA301_RST_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LD1_GREEN_Pin LD3_RED_Pin */
   GPIO_InitStruct.Pin = LD1_GREEN_Pin|LD3_RED_Pin;

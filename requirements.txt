@@ -1,2 +1,3 @@
-# Nessuna dipendenza Python specifica per questo progetto.
-# Aggiungi qui eventuali pacchetti Python richiesti in futuro.
+# Dipendenze Python per la AntiSEL Dashboard (antisel_dashboard_eth.py)
+customtkinter>=5.2.0
+matplotlib>=3.5

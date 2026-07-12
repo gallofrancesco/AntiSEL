@@ -77,7 +77,7 @@ static float t_hold_ms = 1.0f;
 static float t_on_ms = 1.0f;
 
 /* Macchina a Stati AntiSEL (Latch Mode) */
-typedef enum { STATE_IDLE = 0, STATE_THOLD, STATE_TON, STATE_PERMANENT_OFF } AntiSEL_State_t;
+typedef enum { STATE_IDLE = 0, STATE_THOLD, STATE_TON, STATE_PERMANENT_OFF, STATE_COOLDOWN } AntiSEL_State_t;
 
 static volatile AntiSEL_State_t antisel_state = STATE_IDLE;
 static volatile uint32_t antisel_t0_us = 0;  /* riferimento TIM2 @ 1 MHz */
@@ -93,6 +93,7 @@ static uint8_t th_selected = 0; /* 0 = nessuna preset attiva, 1..3 */
 
 /* Allineato a 32 byte per la cache-maintenance (D-Cache attiva + DMA) */
 __attribute__((aligned(32))) static uint16_t adc_buffer[ADC_BUF_SIZE];
+static uint16_t trace_copy_buf[ADC_BUF_SIZE];
 static volatile uint8_t adc_running = 0;
 
 static uint32_t trace_len = 0;         /* n. campioni da inviare */
@@ -101,12 +102,19 @@ static uint8_t  trace_is_sending = 0;
 static uint32_t trace_start_index = 0;
 static float    trace_thold_ms = 0.0f; /* snapshot parametri al freeze */
 static float    trace_ton_ms = 0.0f;
+static uint32_t cooldown_high_t0 = 0;
+
+/* Policy di riarmo (latched): ri-scatti CONSECUTIVI dopo il power-cycle,
+ * azzerati su recupero pulito. */
+static uint32_t sel_retry_max  = SEL_RETRY_MAX; /* N riarmi consecutivi max */
+static uint32_t t_clear_ms     = 30U;           /* finestra "pulito" (ms) */
+static uint8_t  recover_is_sel = 0U;            /* 1 = cooldown dopo SEL */
 
 /* Server TCP porta 7755 — AntiSEL Control Protocol */
 static struct tcp_pcb *tcp_server_pcb = NULL;
 static struct tcp_pcb *tcp_client_pcb = NULL;
 
-static const char *state_names[] = {"IDLE", "THOLD", "TON", "PERMANENT_OFF"};
+static const char *state_names[] = {"IDLE", "THOLD", "TON", "PERMANENT_OFF", "COOLDOWN"};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -133,6 +141,10 @@ static void handle_command(struct tcp_pcb *tpcb, char *line);
 /* Timebase a 1 µs (R-03/R-04: risoluzione richiesta <= 100 µs).
  * TIM2 è a 32 bit: wrap ogni ~71 min, gestito con aritmetica unsigned. */
 static inline uint32_t micros(void) { return TIM2->CNT; }
+
+static inline uint8_t Is_Alert_Active(void) {
+  return (HAL_GPIO_ReadPin(INA301_ALERT_GPIO_Port, INA301_ALERT_Pin) == GPIO_PIN_RESET) ? 1U : 0U;
+}
 
 static void MicroTimebase_Init(void) {
   __HAL_RCC_TIM2_CLK_ENABLE();
@@ -193,6 +205,36 @@ static inline uint32_t ADC_WritePos(void) {
   return (ADC_BUF_SIZE - __HAL_DMA_GET_COUNTER(hadc1.DMA_Handle)) % ADC_BUF_SIZE;
 }
 
+/* Ultimo campione ADC (corrente istantanea, 16 bit) scritto dal DMA. */
+static inline uint16_t Adc_Latest(void) {
+  if (!adc_running) return 0U;
+  uint32_t idx = (ADC_WritePos() + ADC_BUF_SIZE - 1U) % ADC_BUF_SIZE;
+  uint32_t addr = ((uint32_t)&adc_buffer[idx]) & ~31U;
+  SCB_InvalidateDCache_by_Addr((uint32_t *)addr, 32);
+  return adc_buffer[idx];
+}
+
+/* Soglia in conteggi ADC (16 bit) equivalente al V_LIMIT del DAC (12 bit):
+ * stesso dominio di tensione -> thr = dac * 65535 / 4095. */
+static inline uint32_t Threshold_Adc(void) {
+  uint32_t dac = HAL_DAC_GetValue(&hdac1, DAC_CHANNEL_1);
+  return (uint32_t)(((uint64_t)dac * 65535U) / 4095U);
+}
+
+/* In modo LATCHED l'ALERT resta basso: la discriminazione HCE/SEL usa la
+ * corrente reale letta dall'ADC. */
+static inline uint8_t Current_Over_Threshold(void) {
+  return (Adc_Latest() > Threshold_Adc()) ? 1U : 0U;
+}
+
+/* Impulso di reset del latch INA301: LOW ~5 us poi HIGH (ri-arma latched). */
+static void Ina301_ResetLatch(void) {
+  HAL_GPIO_WritePin(INA301_RST_GPIO_Port, INA301_RST_Pin, GPIO_PIN_RESET);
+  uint32_t t0 = micros();
+  while ((uint32_t)(micros() - t0) < 5U) { }
+  HAL_GPIO_WritePin(INA301_RST_GPIO_Port, INA301_RST_Pin, GPIO_PIN_SET);
+}
+
 /* Congela la traccia: ferma il DMA e calcola la finestra da inviare
  * (pre-trigger + T_HOLD [+ T_ON per i SEL], spec §6.1).
  * event_type: 1 = SEL, 2 = HCE. Se una traccia è già in invio (DMA fermo)
@@ -202,8 +244,6 @@ static void Trace_Freeze(uint8_t event_type) {
     return; /* best-effort: non sovrascrivere una traccia in corso */
   }
   uint32_t write_pos = ADC_WritePos();
-  HAL_ADC_Stop_DMA(&hadc1);
-  adc_running = 0;
   /* D-Cache attiva: invalida prima di leggere dati scritti dal DMA */
   SCB_InvalidateDCache_by_Addr((uint32_t *)adc_buffer, sizeof(adc_buffer));
 
@@ -215,6 +255,13 @@ static void Trace_Freeze(uint8_t event_type) {
     trace_len = ADC_BUF_SIZE;
   }
   trace_start_index = (write_pos + ADC_BUF_SIZE - trace_len) % ADC_BUF_SIZE;
+
+  /* Copia i campioni nel buffer secondario per congelarli senza fermare il DMA */
+  for (uint32_t i = 0; i < trace_len; i++) {
+    uint32_t idx = (trace_start_index + i) % ADC_BUF_SIZE;
+    trace_copy_buf[i] = adc_buffer[idx];
+  }
+
   flag_send_trace = event_type;
 }
 /* USER CODE END 0 */
@@ -303,6 +350,7 @@ int main(void)
 
   HAL_DAC_Start(&hdac1, DAC_CHANNEL_1);
   HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 2048);
+  Ina301_ResetLatch();   /* latch pulito all'avvio */
   TCP_Server_Init();
   /* USER CODE END 2 */
 
@@ -313,42 +361,63 @@ int main(void)
     if (antisel_state == STATE_THOLD) {
       if ((uint32_t)(micros() - antisel_t0_us) >=
           (uint32_t)(t_hold_ms * 1000.0f)) {
-        /* Tempo T_HOLD scaduto: controlliamo se l'ALERT è ancora basso */
-        if (HAL_GPIO_ReadPin(INA301_ALERT_GPIO_Port, INA301_ALERT_Pin) ==
-            GPIO_PIN_RESET) {
-          /* Evento SEL Confermato! Sganciamo il DUT.
+        /* Fine T_HOLD: in modo LATCHED l'ALERT resta basso -> discriminazione
+         * HCE/SEL sulla corrente reale (ADC), non sul pin. */
+        if (Current_Over_Threshold()) {
+          /* SEL: corrente ancora oltre soglia -> sgancia il DUT. Conta una
+           * sola volta (misura cross-section).
            * NB: il DMA continua a girare per catturare anche il T_ON (R-06) */
+          sel_count++;
           HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin,
                             GPIO_PIN_RESET);
           antisel_state = STATE_TON;
           antisel_t0_us = micros();
         } else {
-          /* Evento HCE (High Current Event), rientrato nel T_HOLD.
-           * Nessuno sgancio. */
+          /* HCE: corrente rientrata entro il T_HOLD. Nessuno sgancio. */
           hce_count++;
-          sel_retry_count = 0; /* HCE: azzeriamo il counter dei fallimenti */
-          Trace_Freeze(2);     /* 2 = HCE */
-          antisel_state = STATE_IDLE;
+          sel_retry_count = 0;
+          Trace_Freeze(2);        /* 2 = HCE */
+          Ina301_ResetLatch();    /* sblocca il latch dell'INA301 */
+          recover_is_sel = 0U;
+          antisel_state = STATE_COOLDOWN;
+          cooldown_high_t0 = HAL_GetTick();
         }
       }
     } else if (antisel_state == STATE_TON) {
       if ((uint32_t)(micros() - antisel_t0_us) >=
           (uint32_t)(t_on_ms * 1000.0f)) {
-        /* Tempo T_ON scaduto: la traccia ora copre pre + T_HOLD + T_ON */
-        sel_count++;
-        Trace_Freeze(1); /* 1 = SEL */
-        /* Gestiamo i tentativi di riarmo */
-        if (sel_retry_count < SEL_RETRY_MAX) {
-          sel_retry_count++;
-          /* IMPORTANT: impostare lo stato PRIMA di riaccendere il DUT per
-           * evitare race condition con l'EXTI */
-          antisel_state = STATE_IDLE;
-          HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin,
-                            GPIO_PIN_SET);
+        /* Fine T_ON: la traccia copre pre + T_HOLD + T_ON. Riaccendi il DUT e
+         * sblocca il latch, poi verifica il recupero (finestra T_CLEAR). */
+        Trace_Freeze(1);          /* 1 = SEL */
+        HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_SET);
+        Ina301_ResetLatch();
+        recover_is_sel = 1U;
+        antisel_state = STATE_COOLDOWN;
+        cooldown_high_t0 = HAL_GetTick();
+      }
+    } else if (antisel_state == STATE_COOLDOWN) {
+      /* Verifica recupero. Dopo un SEL: se la corrente torna sopra soglia entro
+       * T_CLEAR -> ri-latch (recupero fallito) -> nuovo power-cycle; dopo N
+       * ri-scatti consecutivi -> PERMANENT_OFF. Se resta pulito per T_CLEAR ->
+       * recupero riuscito, azzera i tentativi e riarma l'EXTI. */
+      if (recover_is_sel && Current_Over_Threshold()) {
+        sel_retry_count++;
+        HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_RESET);
+        if (sel_retry_count >= sel_retry_max) {
+          antisel_state = STATE_PERMANENT_OFF;   /* corto persistente */
         } else {
-          /* Tentativi esauriti. Il DUT rimane spento definitivamente. */
-          antisel_state = STATE_PERMANENT_OFF;
+          antisel_state = STATE_TON;             /* nuovo power-cycle */
+          antisel_t0_us = micros();
         }
+      } else if (HAL_GetTick() - cooldown_high_t0 >= t_clear_ms) {
+        sel_retry_count = 0;                      /* recupero riuscito */
+        Ina301_ResetLatch();
+        antisel_state = STATE_IDLE;
+        __HAL_GPIO_EXTI_CLEAR_IT(INA301_ALERT_Pin);
+        __DSB();
+        (void)EXTI->PR1; /* Dummy read to flush the write buffer */
+        HAL_NVIC_ClearPendingIRQ(EXTI15_10_IRQn);
+        HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
       }
     }
 
@@ -383,48 +452,49 @@ int main(void)
         tcp_output(tcp_client_pcb);
         trace_send_index = 0;
         trace_is_sending = 1;
-      } else {
-        /* Se non c'è un client, riavvia subito il DMA */
-        ADC_Restart();
       }
     }
 
     if (trace_is_sending) {
       if (tcp_client_pcb != NULL) {
-        /* Max 40 campioni per ciclo per non intasare LwIP */
-        uint32_t saved_index = trace_send_index;
-        char buf[640] = {0};
-        int len = 0;
+        /* Controlliamo se c'è spazio sufficiente nel buffer TCP (max ~480 byte per 40 campioni)
+         * prima di formattare la stringa, per evitare loop intensivi di snprintf. */
+        if (tcp_sndbuf(tcp_client_pcb) >= 480U) {
+          char buf[640] = {0};
+          int len = 0;
 
-        for (int i = 0; i < 40 && trace_send_index < trace_len; i++) {
-          uint32_t idx =
-              (trace_start_index + trace_send_index) % ADC_BUF_SIZE;
-          len += snprintf(buf + len, sizeof(buf) - len, "%lu,%u\r\n",
-                          (unsigned long)trace_send_index, adc_buffer[idx]);
-          trace_send_index++;
-        }
+          for (int i = 0; i < 40 && trace_send_index < trace_len; i++) {
+            int remaining = sizeof(buf) - len;
+            if (remaining <= 0) {
+              break;
+            }
+            int written = snprintf(buf + len, remaining, "%lu,%u\r\n",
+                                   (unsigned long)trace_send_index, trace_copy_buf[trace_send_index]);
+            if (written > 0 && written < remaining) {
+              len += written;
+            } else {
+              break;
+            }
+            trace_send_index++;
+          }
 
-        /* Se c'è spazio nel buffer TCP SND, inviamo il chunk */
-        if (tcp_sndbuf(tcp_client_pcb) >= (u16_t)len) {
-          tcp_write(tcp_client_pcb, buf, len, TCP_WRITE_FLAG_COPY);
-          tcp_output(tcp_client_pcb);
-        } else {
-          /* Fallback: riproveremo lo stesso chunk al prossimo giro */
-          trace_send_index = saved_index;
+          if (len > 0) {
+            tcp_write(tcp_client_pcb, buf, len, TCP_WRITE_FLAG_COPY);
+            tcp_output(tcp_client_pcb);
+          }
         }
 
         if (trace_send_index >= trace_len) {
-          tcp_write(tcp_client_pcb, "TRACE_END\r\n", 11, TCP_WRITE_FLAG_COPY);
-          tcp_output(tcp_client_pcb);
-          trace_is_sending = 0;
-
-          /* Traccia finita: riavvia il DMA per i prossimi eventi! */
-          ADC_Restart();
+          /* Invia il terminatore traccia se c'è spazio sufficiente */
+          if (tcp_sndbuf(tcp_client_pcb) >= 11U) {
+            tcp_write(tcp_client_pcb, "TRACE_END\r\n", 11, TCP_WRITE_FLAG_COPY);
+            tcp_output(tcp_client_pcb);
+            trace_is_sending = 0;
+          }
         }
       } else {
         /* Disconnesso improvvisamente */
         trace_is_sending = 0;
-        ADC_Restart();
       }
     }
 
@@ -562,12 +632,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
   if (GPIO_Pin == INA301_ALERT_Pin) {
     /* È scattato l'allarme (o hai premuto il bottone blu!) */
     if (antisel_state == STATE_IDLE) {
-      /*
-       * IN UNA REALE APPLICAZIONE ANTI-SEL FAST:
-       * Qui spegneresti SUBITO il DUT per sicurezza:
-       * HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin,
-       * GPIO_PIN_RESET);
-       */
+      /* Disabilita temporaneamente l'interruzione EXTI per evitare rimbalzi o oscillazioni */
+      HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
 
       antisel_state = STATE_THOLD;
       antisel_t0_us = micros();
@@ -680,16 +746,16 @@ static void handle_command(struct tcp_pcb *tpcb, char *line) {
     tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
   } else if (strncmp(line, "THOLD_SET", 9) == 0) {
     float v = (float)atof(line + 10);
-    if (v < 1.0f) v = 1.0f;       /* range spec R-03: 1–10 ms */
-    if (v > 10.0f) v = 10.0f;
+    if (v < 1.0f) v = 1.0f;
+    if (v > 1000.0f) v = 1000.0f;
     t_hold_ms = v;
     snprintf(buf, sizeof(buf), "THOLD_SET=%d.%d\r\n", (int)t_hold_ms,
              (int)(t_hold_ms * 10.0f) % 10);
     tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
   } else if (strncmp(line, "TON_SET", 7) == 0) {
     float v = (float)atof(line + 8);
-    if (v < 1.0f) v = 1.0f;       /* range spec R-04: 1–10 ms */
-    if (v > 10.0f) v = 10.0f;
+    if (v < 1.0f) v = 1.0f;
+    if (v > 1000.0f) v = 1000.0f;
     t_on_ms = v;
     snprintf(buf, sizeof(buf), "TON_SET=%d.%d\r\n", (int)t_on_ms,
              (int)(t_on_ms * 10.0f) % 10);
@@ -731,6 +797,12 @@ static void handle_command(struct tcp_pcb *tpcb, char *line) {
     sel_retry_count = 0;
     antisel_state = STATE_IDLE;
     HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_SET);
+    Ina301_ResetLatch();
+    __HAL_GPIO_EXTI_CLEAR_IT(INA301_ALERT_Pin);
+    __DSB();
+    (void)EXTI->PR1; /* Dummy read to flush the write buffer */
+    HAL_NVIC_ClearPendingIRQ(EXTI15_10_IRQn);
+    HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
     tcp_write(tpcb, "DUT_ON OK\r\n", 11, TCP_WRITE_FLAG_COPY);
   } else if (strncmp(line, "DUT_OFF", 7) == 0) {
     HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_RESET);
@@ -742,7 +814,31 @@ static void handle_command(struct tcp_pcb *tpcb, char *line) {
     hce_count = 0;
     antisel_state = STATE_IDLE;
     HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_SET);
+    Ina301_ResetLatch();
+    __HAL_GPIO_EXTI_CLEAR_IT(INA301_ALERT_Pin);
+    __DSB();
+    (void)EXTI->PR1; /* Dummy read to flush the write buffer */
+    HAL_NVIC_ClearPendingIRQ(EXTI15_10_IRQn);
+    HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
     tcp_write(tpcb, "RESET OK\r\n", 10, TCP_WRITE_FLAG_COPY);
+
+  } else if (strncmp(line, "INA_RST", 7) == 0) {
+    Ina301_ResetLatch();
+    tcp_write(tpcb, "INA_RST OK\r\n", 12, TCP_WRITE_FLAG_COPY);
+  } else if (strncmp(line, "RETRY_SET", 9) == 0) {
+    int n = atoi(line + 10);
+    if (n < 1) n = 1;
+    if (n > 100) n = 100;
+    sel_retry_max = (uint32_t)n;
+    snprintf(buf, sizeof(buf), "RETRY_SET=%lu\r\n", (unsigned long)sel_retry_max);
+    tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
+  } else if (strncmp(line, "TCLEAR_SET", 10) == 0) {
+    int n = atoi(line + 11);
+    if (n < 1) n = 1;
+    if (n > 10000) n = 10000;
+    t_clear_ms = (uint32_t)n;
+    snprintf(buf, sizeof(buf), "TCLEAR_SET=%lu\r\n", (unsigned long)t_clear_ms);
+    tcp_write(tpcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
   } else {
     tcp_write(tpcb, "ACK\r\n", 5, TCP_WRITE_FLAG_COPY);
   }

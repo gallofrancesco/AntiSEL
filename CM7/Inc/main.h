@@ -58,8 +58,10 @@ void Error_Handler(void);
 
 /* Private defines -----------------------------------------------------------*/
 #define INA301_ALERT_Pin GPIO_PIN_13
-#define INA301_ALERT_GPIO_Port GPIOC
+#define INA301_ALERT_GPIO_Port GPIOE
 #define INA301_ALERT_EXTI_IRQn EXTI15_10_IRQn
+#define INA301_RST_Pin GPIO_PIN_14
+#define INA301_RST_GPIO_Port GPIOE
 #define INA301_OUT_Pin GPIO_PIN_3
 #define INA301_OUT_GPIO_Port GPIOA
 #define LD1_GREEN_Pin GPIO_PIN_0

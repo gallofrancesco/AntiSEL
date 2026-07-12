@@ -1,0 +1,89 @@
+<svg viewBox="0 0 940 560" xmlns="http://www.w3.org/2000/svg" font-family="ui-sans-serif,system-ui,sans-serif">
+<rect width="940" height="560" fill="#ffffff"/>
+<style>
+.t{fill:#1b1b1b;font-size:16px;font-weight:700}
+.brd{fill:#f4f4f5;stroke:#8a8a8a;stroke-width:1.5}
+.bt{fill:#1b1b1b;font-size:14px;font-weight:700}
+.bd{fill:#6b7280;font-size:11px}
+.pin{fill:#1b1b1b;font-size:12.5px;font-family:ui-monospace,monospace;font-weight:600}
+.pd{fill:#f4f4f5;stroke:#8a8a8a;stroke-width:1.2}
+.wT{stroke:#2563eb;stroke-width:2.4;fill:none}
+.wI{stroke:#d97706;stroke-width:2.4;fill:none}
+.wR{stroke:#15a34a;stroke-width:2.4;fill:none}
+.wG{stroke:#555;stroke-width:2.4;fill:none}
+.cmp{stroke:#333;stroke-width:2;fill:none}
+.lbl{fill:#333;font-size:11px}
+.note{fill:#6b7280;font-size:11px}
+.aT{fill:#2563eb}.aI{fill:#d97706}.aR{fill:#15a34a}
+</style>
+<text x="470.0" y="34" text-anchor="middle" class="t">Cablaggio emulatore Arduino ↔ NUCLEO (firmware latched)</text>
+<rect x="40" y="80" width="185" height="380" rx="12" class="brd"/>
+<text x="132" y="106" text-anchor="middle" class="bt">Arduino Uno</text>
+<text x="132" y="122" text-anchor="middle" class="bd">5 V · alim. da USB</text>
+<rect x="715" y="80" width="185" height="380" rx="12" class="brd"/>
+<text x="807" y="106" text-anchor="middle" class="bt">NUCLEO-H755ZI-Q</text>
+<text x="807" y="122" text-anchor="middle" class="bd">3,3 V</text>
+<circle cx="225" cy="160" r="4" class="pd"/>
+<text x="216" y="164" text-anchor="end" class="pin">D8</text>
+<circle cx="225" cy="245" r="4" class="pd"/>
+<text x="216" y="249" text-anchor="end" class="pin">D9</text>
+<circle cx="225" cy="340" r="4" class="pd"/>
+<text x="216" y="344" text-anchor="end" class="pin">D2</text>
+<circle cx="225" cy="390" r="4" class="pd"/>
+<text x="216" y="394" text-anchor="end" class="pin">A0</text>
+<circle cx="225" cy="435" r="4" class="pd"/>
+<text x="216" y="439" text-anchor="end" class="pin">GND</text>
+<circle cx="715" cy="160" r="4" class="pd"/>
+<text x="724" y="164" class="pin">PE13</text>
+<circle cx="715" cy="245" r="4" class="pd"/>
+<text x="724" y="249" class="pin">PA3</text>
+<circle cx="715" cy="340" r="4" class="pd"/>
+<text x="724" y="344" class="pin">PG14</text>
+<circle cx="715" cy="390" r="4" class="pd"/>
+<text x="724" y="394" class="pin">PA4</text>
+<circle cx="715" cy="435" r="4" class="pd"/>
+<text x="724" y="439" class="pin">GND</text>
+<text x="724" y="176" class="lbl">= D3 (CN10-10)</text>
+<text x="724" y="261" class="lbl">= A0/CN9-1</text>
+<path class="wT" d="M225 160 H330"/>
+<polyline class="wT" points="330,160 337,154 350,166 363,154 377,166 390,154 403,166 410,160"/>
+<path class="wT" d="M410 160 H705"/>
+<polygon class="aT" points="715,160 705,155 705,165"/>
+<text x="370" y="147" text-anchor="middle" class="lbl">1 kΩ</text>
+<text x="470" y="152" class="lbl" fill="#2563eb">trigger (open-drain)</text>
+<path class="wI" d="M225 245 H300"/>
+<polyline class="wI" points="300,245 307,239 321,251 335,239 350,251 364,239 378,251 385,245"/>
+<path class="wI" d="M385 245 H705"/>
+<polygon class="aI" points="715,245 705,240 705,250"/>
+<text x="342" y="233" text-anchor="middle" class="lbl">220 Ω</text>
+<text x="500" y="237" class="lbl" fill="#d97706">PA3: alto ≈ 1,56 V / basso 0 V</text>
+<circle cx="430" cy="245" r="3" fill="#d97706"/>
+<path class="cmp" d="M430 248 V255"/>
+<polyline class="cmp" points="430,255 424,258 436,264 424,270 436,275 424,281 436,287 430,290"/>
+<path class="cmp" d="M430 290 V300"/>
+<text x="396" y="278" class="lbl">100 Ω</text>
+<path class="cmp" d="M430 245 H478"/>
+<path class="cmp" d="M478 245 V270"/>
+<line class="cmp" x1="467" y1="270" x2="489" y2="270"/>
+<line class="cmp" x1="467" y1="278" x2="489" y2="278"/>
+<path class="cmp" d="M478 278 V300"/>
+<text x="485" y="266" class="lbl">1 µF</text>
+<line class="wG" x1="430" y1="300" x2="478" y2="300"/>
+<line class="wG" x1="454" y1="300" x2="454" y2="307"/><line class="wG" x1="444" y1="307" x2="464" y2="307"/><line class="wG" x1="448" y1="311" x2="460" y2="311"/><line class="wG" x1="451" y1="315" x2="457" y2="315"/>
+<text x="470" y="308" class="note">(GND comune)</text>
+<path class="wR" d="M715 340 H235"/>
+<polygon class="aR" points="225,340 235,335 235,345"/>
+<text x="590" y="332" text-anchor="middle" class="lbl" fill="#15a34a">monitor switch (PG14→D2)</text>
+<path class="wR" d="M715 390 H235"/>
+<polygon class="aR" points="225,390 235,385 235,395"/>
+<text x="590" y="382" text-anchor="middle" class="lbl" fill="#15a34a">monitor V_LIMIT (PA4→A0)</text>
+<path class="wG" d="M225 435 V490"/>
+<path class="wG" d="M715 435 V490"/>
+<line class="wG" x1="225" y1="490" x2="715" y2="490"/>
+<line class="wG" x1="470" y1="490" x2="470" y2="497"/><line class="wG" x1="460" y1="497" x2="480" y2="497"/><line class="wG" x1="464" y1="501" x2="476" y2="501"/><line class="wG" x1="467" y1="505" x2="473" y2="505"/>
+<text x="470" y="482" text-anchor="middle" class="lbl">massa comune</text>
+<line class="wT" x1="120" y1="524" x2="150" y2="524"/><text x="156" y="528" class="note">trigger D8→[1kΩ]→PE13</text>
+<line class="wI" x1="330" y1="524" x2="360" y2="524"/><text x="366" y="528" class="note">corrente D9→partitore→PA3</text>
+<line class="wR" x1="580" y1="524" x2="610" y2="524"/><text x="616" y="528" class="note">monitor (NUCLEO→Arduino)</text>
+<text x="470" y="548" text-anchor="middle" class="note">Verifica ~1,56 V su PA3 con D9 alto prima di collegare. D8 solo LOW/Hi-Z (mai 5 V). Applica la patch latched al firmware.</text>
+</svg>
