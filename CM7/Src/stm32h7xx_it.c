@@ -52,85 +52,51 @@
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 /* ==========================================================================
- *  Diagnostica fault: lampeggia LD3 (rosso, PB14) con un CODICE che dice
- *  quale tipo di eccezione ha bloccato la CPU.
- *
- *    2 lampeggi  = BusFault    -> accesso a memoria/puntatore/DMA/cache non valido
- *    3 lampeggi  = UsageFault  -> istruzione illegale, accesso non allineato, div/0
- *    4 lampeggi  = MemManage   -> violazione MPU
- *    5 lampeggi  = HardFault forzato / causa non classificata
- *
- *  Sequenza: N lampeggi (~0,25 s l'uno) -> pausa lunga (~1,5 s) -> si ripete.
- *  NB: NON usa HAL_Delay (il SysTick non gira in contesto di fault): busy-wait.
- *  I registri di fault restano leggibili anche via debugger nei globali sotto.
+ *  Diagnostica fault: salva i registri di fault in DTCM (0x20000000, che
+ *  sopravvive al reset software) e RIAVVIA la scheda. Dopo il riavvio, main.c
+ *  rileva il record e invia una riga "FAULT ..." alla GUI (log verde).
+ *  Definizioni FaultRecord_t / FAULT_MAGIC / FAULT_REC in main.h.
  * ========================================================================== */
-volatile uint32_t g_fault_cfsr = 0;   /* SCB->CFSR:  bit di causa del fault */
-volatile uint32_t g_fault_hfsr = 0;   /* SCB->HFSR:  HardFault status */
-volatile uint32_t g_fault_bfar = 0;   /* SCB->BFAR:  indirizzo del BusFault (se valido) */
-volatile uint32_t g_fault_mmfar = 0;  /* SCB->MMFAR: indirizzo del MemManage (se valido) */
-volatile uint32_t g_fault_pc = 0;     /* PC impilato: istruzione che ha faultato */
-
-/* Ritardo in ms preciso, basato sul contatore cicli DWT (indipendente dal
- * costo del loop). Funziona anche in contesto di fault, senza SysTick. */
-static void Fault_DelayMs(uint32_t ms)
+/* 'frame' punta al frame impilato dall'eccezione: [r0,r1,r2,r3,r12,lr,PC,xPSR].
+ * frame[6] e' quindi il PC dell'istruzione che ha causato il fault. */
+__attribute__((used)) void Fault_Report(uint32_t *frame)
 {
-  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;   /* abilita DWT */
-  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;              /* abilita il contatore cicli */
-  uint32_t cyc_per_ms = SystemCoreClock / 1000U;    /* 480000 @ 480 MHz */
-  while (ms--) {
-    uint32_t start = DWT->CYCCNT;
-    while ((DWT->CYCCNT - start) < cyc_per_ms) { __NOP(); }
-  }
-}
-
-#define LED_ON()  (GPIOB->BSRR = (1U << 14))
-#define LED_OFF() (GPIOB->BSRR = (1U << (14 + 16)))
-
-/* Pattern (si ripete all'infinito):
- *   1 lampeggio LUNGO (1,5 s acceso) = MARCATORE di inizio conteggio
- *   pausa 0,8 s
- *   N lampeggi CORTI (0,3 s) = codice del fault
- *   pausa LUNGA 3 s
- * Conta SOLO i lampeggi corti dopo quello lungo. */
-static void Fault_BlinkCode(int n)
-{
-  RCC->AHB4ENR |= RCC_AHB4ENR_GPIOBEN;                 /* clock GPIOB */
-  GPIOB->MODER = (GPIOB->MODER & ~(3U << (14U * 2U)))  /* PB14 = output */
-               | (1U << (14U * 2U));
-  for (;;) {
-    LED_ON();  Fault_DelayMs(1500);   /* marcatore lungo */
-    LED_OFF(); Fault_DelayMs(800);
-    for (int i = 0; i < n; i++) {
-      LED_ON();  Fault_DelayMs(300);
-      LED_OFF(); Fault_DelayMs(300);
-    }
-    Fault_DelayMs(3000);              /* pausa lunga prima di ripetere */
-  }
-}
-
-/* Legge CFSR/HFSR e sceglie il codice. In caso di fault "forzato" (bus/usage/
- * mem escalati a HardFault) i bit di CFSR restano validi. Non ritorna mai. */
-static void Fault_Report(void)
-{
-  g_fault_cfsr = SCB->CFSR;
-  g_fault_hfsr = SCB->HFSR;
-  g_fault_bfar = SCB->BFAR;    /* valido solo se CFSR bit 15 (BFARVALID) = 1 */
-  g_fault_mmfar = SCB->MMFAR;  /* valido solo se CFSR bit 7  (MMARVALID) = 1 */
-  /* PC impilato dall'eccezione (r0..r3,r12,lr,PC,xPSR): la CPU usa MSP.
-   * Cerca all'indietro nello stack il primo indirizzo in area FLASH. */
+  FAULT_REC.cfsr  = SCB->CFSR;
+  FAULT_REC.hfsr  = SCB->HFSR;
+  FAULT_REC.bfar  = SCB->BFAR;    /* indirizzo BusFault  (valido se CFSR bit15=1) */
+  FAULT_REC.mmfar = SCB->MMFAR;   /* indirizzo MemManage (valido se CFSR bit7=1) */
+  FAULT_REC.pc    = (frame != 0) ? frame[6] : 0U;  /* PC reale dell'eccezione */
+  FAULT_REC.lr    = (frame != 0) ? frame[5] : 0U;  /* LR = ritorno al chiamante */
+  /* Scansiona lo stack sopra il frame per i primi 4 indirizzi in FLASH:
+   * ricostruisce la catena di ritorno (utile quando PC/LR sono in RAM). */
   {
-    uint32_t *sp = (uint32_t *)__get_MSP();
-    for (int i = 0; i < 64; i++) {
-      uint32_t v = sp[i];
-      if (v >= 0x08000000U && v < 0x08200000U) { g_fault_pc = v; break; }
+    int found = 0;
+    if (frame != 0) {
+      for (int i = 8; i < 300 && found < 4; i++) {
+        /* non leggere oltre la fine dello stack (RAM_D1 finisce a 0x24080000) */
+        if ((uint32_t)&frame[i] >= 0x2407FFF0U) { break; }
+        uint32_t v = frame[i];
+        if (v >= 0x08000000U && v < 0x08200000U) { FAULT_REC.stk[found++] = v; }
+      }
     }
+    for (; found < 4; found++) { FAULT_REC.stk[found] = 0U; }
   }
-  int code;
-  if      (g_fault_cfsr & 0xFFFF0000U) { code = 3; }  /* UsageFault */
-  else if (g_fault_cfsr & 0x0000FF00U) { code = 2; }  /* BusFault */
-  else if (g_fault_cfsr & 0x000000FFU) { code = 4; }  /* MemManage */
-  else                                 { code = 5; }  /* forzato/altro */
-  Fault_BlinkCode(code);
+  FAULT_REC.magic = FAULT_MAGIC;
+  __DSB();
+
+  /* Conferma visiva: lampeggia LD3 (rosso, PB14) ~6 volte per segnalare che il
+   * fault handler e' stato eseguito, POI resetta. Se vedi il rosso lampeggiare,
+   * il crash e' passato di qui e il record e' salvato. */
+  RCC->AHB4ENR |= RCC_AHB4ENR_GPIOBEN;
+  GPIOB->MODER = (GPIOB->MODER & ~(3U << 28)) | (1U << 28);  /* PB14 = output */
+  for (int b = 0; b < 6; b++) {
+    GPIOB->BSRR = (1U << 14);                                /* LED ON  */
+    for (volatile uint32_t k = 0; k < 12000000U; k++) { __NOP(); }
+    GPIOB->BSRR = (1U << (14 + 16));                         /* LED OFF */
+    for (volatile uint32_t k = 0; k < 12000000U; k++) { __NOP(); }
+  }
+
+  NVIC_SystemReset();             /* riavvia: al boot main.c invia i dati alla GUI */
 }
 /* USER CODE END 0 */
 
@@ -161,61 +127,59 @@ void NMI_Handler(void)
 /**
   * @brief This function handles Hard fault interrupt.
   */
-void HardFault_Handler(void)
+__attribute__((naked)) void HardFault_Handler(void)
 {
-  /* USER CODE BEGIN HardFault_IRQn 0 */
-  Fault_Report();   /* lampeggia LD3 rosso col codice del fault - non ritorna */
-  /* USER CODE END HardFault_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_HardFault_IRQn 0 */
-    /* USER CODE END W1_HardFault_IRQn 0 */
-  }
+  /* Naked: nessun prologo, cosi' MSP/PSP puntano ancora al frame dell'eccezione.
+   * Passa il frame in r0 e salta a Fault_Report (che salva i registri e resetta). */
+  __asm volatile (
+      "tst lr, #4       \n"   /* EXC_RETURN bit2: 0 = MSP, 1 = PSP */
+      "ite eq           \n"
+      "mrseq r0, msp    \n"
+      "mrsne r0, psp    \n"
+      "b Fault_Report   \n"
+  );
 }
 
 /**
   * @brief This function handles Memory management fault.
   */
-void MemManage_Handler(void)
+__attribute__((naked)) void MemManage_Handler(void)
 {
-  /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-  Fault_Report();
-  /* USER CODE END MemoryManagement_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_MemoryManagement_IRQn 0 */
-    /* USER CODE END W1_MemoryManagement_IRQn 0 */
-  }
+  __asm volatile (
+      "tst lr, #4       \n"
+      "ite eq           \n"
+      "mrseq r0, msp    \n"
+      "mrsne r0, psp    \n"
+      "b Fault_Report   \n"
+  );
 }
 
 /**
   * @brief This function handles Pre-fetch fault, memory access fault.
   */
-void BusFault_Handler(void)
+__attribute__((naked)) void BusFault_Handler(void)
 {
-  /* USER CODE BEGIN BusFault_IRQn 0 */
-  Fault_Report();
-  /* USER CODE END BusFault_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_BusFault_IRQn 0 */
-    /* USER CODE END W1_BusFault_IRQn 0 */
-  }
+  __asm volatile (
+      "tst lr, #4       \n"
+      "ite eq           \n"
+      "mrseq r0, msp    \n"
+      "mrsne r0, psp    \n"
+      "b Fault_Report   \n"
+  );
 }
 
 /**
   * @brief This function handles Undefined instruction or illegal state.
   */
-void UsageFault_Handler(void)
+__attribute__((naked)) void UsageFault_Handler(void)
 {
-  /* USER CODE BEGIN UsageFault_IRQn 0 */
-  Fault_Report();
-  /* USER CODE END UsageFault_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_UsageFault_IRQn 0 */
-    /* USER CODE END W1_UsageFault_IRQn 0 */
-  }
+  __asm volatile (
+      "tst lr, #4       \n"
+      "ite eq           \n"
+      "mrseq r0, msp    \n"
+      "mrsne r0, psp    \n"
+      "b Fault_Report   \n"
+  );
 }
 
 /**

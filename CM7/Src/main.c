@@ -99,6 +99,13 @@ static volatile uint8_t adc_running = 0;
 static uint32_t trace_len = 0;         /* n. campioni da inviare */
 static uint32_t trace_send_index = 0;
 static uint8_t  trace_is_sending = 0;
+
+/* Post-mortem: record di fault recuperato dal DTCM dopo un crash+reset, da
+ * inviare alla GUI come riga "FAULT ..." appena il client TCP e' connesso. */
+static uint8_t  fault_pending    = 0;   /* c'e' un record di fault da inviare */
+static uint32_t fault_snap[10]   = {0};
+static uint32_t fault_last_send  = 0;
+static uint8_t  fault_send_count = 0;
 static uint32_t trace_start_index = 0;
 static float    trace_thold_ms = 0.0f; /* snapshot parametri al freeze */
 static float    trace_ton_ms = 0.0f;
@@ -352,6 +359,23 @@ int main(void)
   HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 2048);
   Ina301_ResetLatch();   /* latch pulito all'avvio */
   TCP_Server_Init();
+
+  /* Recupero del record di fault dopo un crash+reset (salvato in DTCM dal
+   * fault handler). Se presente, verra' inviato alla GUI nel loop principale. */
+  if (FAULT_REC.magic == FAULT_MAGIC) {
+    fault_pending  = 1;
+    fault_snap[0]  = FAULT_REC.cfsr;
+    fault_snap[1]  = FAULT_REC.hfsr;
+    fault_snap[2]  = FAULT_REC.bfar;
+    fault_snap[3]  = FAULT_REC.mmfar;
+    fault_snap[4]  = FAULT_REC.pc;
+    fault_snap[5]  = FAULT_REC.lr;
+    fault_snap[6]  = FAULT_REC.stk[0];
+    fault_snap[7]  = FAULT_REC.stk[1];
+    fault_snap[8]  = FAULT_REC.stk[2];
+    fault_snap[9]  = FAULT_REC.stk[3];
+    FAULT_REC.magic = 0U;   /* consuma il record: non ripetere ai reset futuri */
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -553,6 +577,30 @@ int main(void)
           tcp_write(tcp_client_pcb, buf, strlen(buf), TCP_WRITE_FLAG_COPY);
           tcp_output(tcp_client_pcb);
         }
+      }
+    }
+
+    /* ── Invio del record di fault alla GUI dopo un crash ─────────────────
+     * Dopo un crash la scheda si e' resettata e ha salvato i registri in DTCM.
+     * Qui li mandiamo alla GUI (log verde) una volta al secondo, ripetuti ~20
+     * volte, cosi' li vedi anche se riconnetti la GUI con calma.
+     * --------------------------------------------------------------------- */
+    if (fault_pending && tcp_client_pcb != NULL &&
+        (HAL_GetTick() - fault_last_send >= 1000U)) {
+      fault_last_send = HAL_GetTick();
+      char fb[240];
+      int fl = snprintf(fb, sizeof(fb),
+          "FAULT HFSR=0x%08lX CFSR=0x%08lX BFAR=0x%08lX PC=0x%08lX LR=0x%08lX "
+          "STK=%08lX,%08lX,%08lX,%08lX\r\n",
+          (unsigned long)fault_snap[1], (unsigned long)fault_snap[0],
+          (unsigned long)fault_snap[2],
+          (unsigned long)fault_snap[4], (unsigned long)fault_snap[5],
+          (unsigned long)fault_snap[6], (unsigned long)fault_snap[7],
+          (unsigned long)fault_snap[8], (unsigned long)fault_snap[9]);
+      if (fl > 0 && tcp_sndbuf(tcp_client_pcb) >= (uint16_t)fl) {
+        tcp_write(tcp_client_pcb, fb, fl, TCP_WRITE_FLAG_COPY);
+        tcp_output(tcp_client_pcb);
+        if (++fault_send_count >= 20U) { fault_pending = 0; }
       }
     }
 
