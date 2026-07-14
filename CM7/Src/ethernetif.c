@@ -342,23 +342,6 @@ void ethernetif_input(struct netif *netif)
 {
   struct pbuf *p = NULL;
 
-  /* 1. Rilascia i pacchetti trasmessi per liberare descrittori TX */
-  HAL_ETH_ReleaseTxPacket(&heth);
-
-  /* 2. Se il DMA di TX è sospeso per mancanza di buffer (TBU), riavvialo */
-  if ((heth.Instance->DMACSR & ETH_DMACSR_TBU) != 0U)
-  {
-    heth.Instance->DMACSR = ETH_DMACSR_TBU;
-    WRITE_REG(heth.Instance->DMACTDTPR, (uint32_t)(heth.TxDescList.TxDesc[heth.TxDescList.CurTxDesc]));
-  }
-
-  /* 3. Se il DMA di RX è sospeso per mancanza di descrittori (RBU), riavvialo */
-  if ((heth.Instance->DMACSR & ETH_DMACSR_RBU) != 0U)
-  {
-    heth.Instance->DMACSR = ETH_DMACSR_RBU;
-    WRITE_REG(heth.Instance->DMACRDTPR, (uint32_t)(heth.RxDescList.RxDesc[heth.RxDescList.RxDescIdx]));
-  }
-
   do
   {
     p = low_level_input( netif );
