@@ -277,6 +277,9 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
   err_t errval = ERR_OK;
   ETH_BufferTypeDef Txbuffer[ETH_TX_DESC_CNT] = {0};
 
+  /* Release previously transmitted packets to free their pbufs */
+  HAL_ETH_ReleaseTxPacket(&heth);
+
   memset(Txbuffer, 0 , ETH_TX_DESC_CNT*sizeof(ETH_BufferTypeDef));
 
   for(q = p; q != NULL; q = q->next)
@@ -286,6 +289,11 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
 
     Txbuffer[i].buffer = q->payload;
     Txbuffer[i].len = q->len;
+
+    /* Clean D-Cache for the payload buffer area to ensure DMA reads updated data */
+    uint32_t aligned_addr = (uint32_t)q->payload & ~0x1FU;
+    uint32_t size = (q->len + 31) & ~0x1FU;
+    SCB_CleanDCache_by_Addr((uint32_t *)aligned_addr, size);
 
     if(i>0)
     {

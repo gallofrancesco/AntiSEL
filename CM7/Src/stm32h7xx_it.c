@@ -129,57 +129,60 @@ void NMI_Handler(void)
   */
 __attribute__((naked)) void HardFault_Handler(void)
 {
-  /* Naked: nessun prologo, cosi' MSP/PSP puntano ancora al frame dell'eccezione.
-   * Passa il frame in r0 e salta a Fault_Report (che salva i registri e resetta). */
+  /* USER CODE BEGIN HardFault_IRQn 0 */
   __asm volatile (
-      "tst lr, #4       \n"   /* EXC_RETURN bit2: 0 = MSP, 1 = PSP */
-      "ite eq           \n"
-      "mrseq r0, msp    \n"
-      "mrsne r0, psp    \n"
-      "b Fault_Report   \n"
+    "tst lr, #4 \n"
+    "ite eq \n"
+    "mrseq r0, msp \n"
+    "mrsne r0, psp \n"
+    "b Fault_Report \n"
   );
+  /* USER CODE END HardFault_IRQn 0 */
 }
 
 /**
   * @brief This function handles Memory management fault.
   */
-__attribute__((naked)) void MemManage_Handler(void)
+void MemManage_Handler(void)
 {
-  __asm volatile (
-      "tst lr, #4       \n"
-      "ite eq           \n"
-      "mrseq r0, msp    \n"
-      "mrsne r0, psp    \n"
-      "b Fault_Report   \n"
-  );
+  /* USER CODE BEGIN MemoryManagement_IRQn 0 */
+
+  /* USER CODE END MemoryManagement_IRQn 0 */
+  while (1)
+  {
+    /* USER CODE BEGIN W1_MemoryManagement_IRQn 0 */
+    /* USER CODE END W1_MemoryManagement_IRQn 0 */
+  }
 }
 
 /**
   * @brief This function handles Pre-fetch fault, memory access fault.
   */
-__attribute__((naked)) void BusFault_Handler(void)
+void BusFault_Handler(void)
 {
-  __asm volatile (
-      "tst lr, #4       \n"
-      "ite eq           \n"
-      "mrseq r0, msp    \n"
-      "mrsne r0, psp    \n"
-      "b Fault_Report   \n"
-  );
+  /* USER CODE BEGIN BusFault_IRQn 0 */
+
+  /* USER CODE END BusFault_IRQn 0 */
+  while (1)
+  {
+    /* USER CODE BEGIN W1_BusFault_IRQn 0 */
+    /* USER CODE END W1_BusFault_IRQn 0 */
+  }
 }
 
 /**
   * @brief This function handles Undefined instruction or illegal state.
   */
-__attribute__((naked)) void UsageFault_Handler(void)
+void UsageFault_Handler(void)
 {
-  __asm volatile (
-      "tst lr, #4       \n"
-      "ite eq           \n"
-      "mrseq r0, msp    \n"
-      "mrsne r0, psp    \n"
-      "b Fault_Report   \n"
-  );
+  /* USER CODE BEGIN UsageFault_IRQn 0 */
+
+  /* USER CODE END UsageFault_IRQn 0 */
+  while (1)
+  {
+    /* USER CODE BEGIN W1_UsageFault_IRQn 0 */
+    /* USER CODE END W1_UsageFault_IRQn 0 */
+  }
 }
 
 /**

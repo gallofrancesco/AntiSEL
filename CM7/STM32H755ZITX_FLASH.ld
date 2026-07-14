@@ -180,23 +180,23 @@ SECTIONS
 /* Ethernet DMA descriptors — devono stare in RAM_D2 (non cacheable da M7) */
   .RxDescripSection :
   {
-    . = ALIGN(4);
+    . = ALIGN(32);
     KEEP(*(.RxDescripSection))
-    . = ALIGN(4);
+    . = ALIGN(32);
   } >RAM_D2
 
   .TxDescripSection :
   {
-    . = ALIGN(4);
+    . = ALIGN(32);
     KEEP(*(.TxDescripSection))
-    . = ALIGN(4);
+    . = ALIGN(32);
   } >RAM_D2
 
   .Rx_PoolSection :
   {
-    . = ALIGN(4);
+    . = ALIGN(32);
     KEEP(*(.Rx_PoolSection))
-    . = ALIGN(4);
+    . = ALIGN(32);
   } >RAM_D2
   /* Remove information from the compiler libraries */
   /DISCARD/ :

@@ -58,11 +58,7 @@
 /*----- Default Value for MEM_SIZE: 1600 ---*/
 #define MEM_SIZE 16384
 /*----- Default Value for H7 devices: 0x30004000 -----*/
-/* FIX: 0x30004000 si sovrapponeva al pool RX dei pbuf (0x300000c0 .. ~0x30004A40
- * con ETH_RX_BUFFER_CNT=12): l'heap TCP, riempito durante l'invio della traccia,
- * sovrascriveva i pbuf RX -> payload corrotto -> crash in ethernet_input.
- * Spostato oltre il pool RX. Heap: 0x30008000 .. 0x3000C000 (RAM_D2, non-cache). */
-#define LWIP_RAM_HEAP_POINTER 0x30008000
+#define LWIP_RAM_HEAP_POINTER 0x30005000
 /*----- Value supported for H7 devices: 1 -----*/
 #define LWIP_SUPPORT_CUSTOM_PBUF 1
 /*----- Value in opt.h for LWIP_ETHERNET: LWIP_ARP || PPPOE_SUPPORT -*/
