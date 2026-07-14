@@ -24,6 +24,13 @@ static uint8_t trace_sending;
 static uint32_t trace_send_index;
 static uint32_t last_log_ms;
 
+/* Crash post-mortem (spec §16): record hard-fault salvato in DTCM dal fault
+ * handler (stm32h7xx_it.c), riportato alla GUI dopo il reset. */
+static uint8_t crash_pending;
+static uint8_t crash_count;
+static uint32_t crash_last_ms;
+static FaultRecord_t crash;
+
 /* ── util ───────────────────────────────────────────────────────────────── */
 static void send_str(struct tcp_pcb *tpcb, const char *s) {
   tcp_write(tpcb, s, strlen(s), TCP_WRITE_FLAG_COPY);
@@ -258,6 +265,13 @@ static err_t on_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
 }
 
 void Proto_Init(void) {
+  /* Rileva un eventuale record di fault sopravvissuto al reset e consumalo. */
+  if (FAULT_REC.magic == FAULT_MAGIC) {
+    crash = FAULT_REC;      /* copia il record dal DTCM */
+    FAULT_REC.magic = 0U;   /* consuma: non ripetere ai reset futuri */
+    crash_pending = 1U;
+  }
+
   server_pcb = tcp_new();
   if (server_pcb == NULL) {
     return;
@@ -370,7 +384,37 @@ static void send_log(void) {
   }
 }
 
+/* Invia il report di crash alla GUI ~1 volta/s, ripetuto fino a 20 volte
+ * (cosi' e' visibile anche riconnettendo la dashboard con calma). */
+static void send_crash(void) {
+  if (!crash_pending || client_pcb == NULL) {
+    return;
+  }
+  if (HAL_GetTick() - crash_last_ms < 1000U) {
+    return;
+  }
+  crash_last_ms = HAL_GetTick();
+  char fb[240];
+  int fl = snprintf(
+      fb, sizeof(fb),
+      "FAULT HFSR=0x%08lX CFSR=0x%08lX BFAR=0x%08lX MMFAR=0x%08lX PC=0x%08lX "
+      "LR=0x%08lX STK=%08lX,%08lX,%08lX,%08lX\r\n",
+      (unsigned long)crash.hfsr, (unsigned long)crash.cfsr,
+      (unsigned long)crash.bfar, (unsigned long)crash.mmfar,
+      (unsigned long)crash.pc, (unsigned long)crash.lr,
+      (unsigned long)crash.stk[0], (unsigned long)crash.stk[1],
+      (unsigned long)crash.stk[2], (unsigned long)crash.stk[3]);
+  if (fl > 0 && tcp_sndbuf(client_pcb) >= (uint16_t)fl) {
+    tcp_write(client_pcb, fb, fl, TCP_WRITE_FLAG_COPY);
+    tcp_output(client_pcb);
+    if (++crash_count >= 20U) {
+      crash_pending = 0U;
+    }
+  }
+}
+
 void Proto_Service(void) {
+  send_crash();
   send_trace();
   send_log();
 }
