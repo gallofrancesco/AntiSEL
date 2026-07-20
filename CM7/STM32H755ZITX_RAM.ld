@@ -37,9 +37,15 @@ ENTRY(Reset_Handler)
 
 /* Highest address of the user mode stack */
 _estack = ORIGIN(RAM_D1) + LENGTH(RAM_D1); /* end of "RAM_D1" Ram type memory */
+/* NOTA: tentativo di spostare lo stack in DTCMRAM per isolarlo dai buffer
+ * DMA dell'ADC (in risposta a un crash con PC/LR vicini all'origine di
+ * RAM_D1) ha causato mancato boot (LED verde spento, GUI non si connette).
+ * Ripristinato qui in RAM_D1; _Min_Stack_Size resta piu' alto come margine
+ * piu' economico. Da capire perche' DTCMRAM non ha funzionato prima di
+ * riprovare lo spostamento. */
 
 _Min_Heap_Size = 0x800; /* required amount of heap  */
-_Min_Stack_Size = 0x1000; /* required amount of stack */
+_Min_Stack_Size = 0x2000; /* required amount of stack */
 
 /* Memories definition */
 MEMORY

@@ -54,7 +54,10 @@ void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOB, LD1_GREEN_Pin|LD3_RED_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, INA301_RST_Pin|LD2_YELLOW_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOE, LD2_YELLOW_Pin, GPIO_PIN_RESET);
+
+  /* INA301_RST a riposo HIGH = comparatore INA301 in modo LATCHED */
+  HAL_GPIO_WritePin(INA301_RST_GPIO_Port, INA301_RST_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(DUT_SWITCH_GPIO_Port, DUT_SWITCH_Pin, GPIO_PIN_RESET);

@@ -36,7 +36,7 @@ uint32_t INA301_LimitVoltageToDacCode(float voltage);
 
 /* Interfaccia hardware ---------------------------------------------------- */
 bool INA301_IsAlertActive(void);   /* pin ALERT basso = allarme attivo */
-void INA301_SetTransparentMode(void); /* RESET basso: comparatore transparent */
+void INA301_ResetLatch(void); /* impulso RESET basso poi alto: azzera e ri-arma il latch */
 bool INA301_ResetAndVerify(void);  /* impulso RESET (diag latched) + verifica */
 
 /* Programma la soglia VLIMIT sul DAC a partire dalla corrente [A].

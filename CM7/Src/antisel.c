@@ -1,11 +1,16 @@
 /**
  ******************************************************************************
  * @file    antisel.c
- * @brief   Macchina a stati AntiSEL a 11 stati (transparent mode).
+ * @brief   Macchina a stati AntiSEL a 11 stati (modo LATCHED).
+ *
+ *  INA301 in modo latched: l'ALERT resta basso finche' non si pulsa RST
+ *  (INA301_ResetLatch), quindi la discriminazione HCE/SEL non puo' piu'
+ *  basarsi sul ritorno alto di ALERT durante T_HOLD ma sulla corrente ADC
+ *  reale campionata a fine T_HOLD.
  *
  *  Percorso protezione:  ALERT (EXTI) -> ALARM -> HOLD_RUN
- *    - ALERT torna alto entro T_HOLD  -> HCE_SAVE -> IDLE  (nessun power-cycle)
- *    - ALERT resta basso a fine T_HOLD -> CUTOFF -> TON_RUN -> RECOVERY ->
+ *    - a fine T_HOLD corrente sotto soglia -> HCE_SAVE -> IDLE  (nessun power-cycle)
+ *    - a fine T_HOLD corrente sopra soglia -> CUTOFF -> TON_RUN -> RECOVERY ->
  *      VERIFY -> IDLE  (oppure FAULT con retry finiti)
  ******************************************************************************
  */
@@ -19,6 +24,12 @@
 
 /* Flag diagnostici (diagnostic_flags del record) */
 #define DIAG_ALERT_STUCK_LOW 0x01U
+/* Limite di re-iniezioni consecutive in exti_rearm_or_trigger(): oltre
+ * questa soglia una linea ALERT che non si libera mai non e' piu' trattata
+ * come una sequenza di eventi genuini ma come guasto bloccato -> FAULT,
+ * per evitare un loop stretto senza fine (visto in pratica: migliaia di
+ * HCE_SAVE in pochi minuti per rumore/bounce sulla linea). */
+#define EXTI_REARM_RETRIGGER_LIMIT 5U
 #define DIAG_ADC_SAT 0x02U
 #define DIAG_RECOVERY_FAIL 0x04U
 
@@ -56,6 +67,40 @@ static void exti_rearm(void) {
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 }
 static void exti_disable(void) { HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); }
+static void go(AntiSelState_t s); /* forward decl: usata da exti_rearm_or_trigger */
+
+/* Riarma l'interrupt sul fronte di discesa, ma se ALERT e' gia' asserto
+ * basso in questo istante nessun nuovo fronte verra' mai generato (race
+ * edge-vs-livello: la linea era gia' bassa al momento del riarmo, es. eventi
+ * ravvicinati nell'auto-cycle). In quel caso si inietta manualmente la
+ * condizione di allarme come se l'ISR fosse scattata, per non restare
+ * bloccati in IDLE a tempo indeterminato con ALERT attivo e non rilevato.
+ * Se questo si ripete troppe volte di fila (linea davvero bloccata/rumorosa,
+ * non un evento genuino) si evita il loop infinito passando a FAULT, con lo
+ * stesso schema gia' usato per i retry di RECOVERY/VERIFY.
+ * Ritorna true se il chiamante deve procedere verso IDLE, false se e' gia'
+ * stato reindirizzato internamente a FAULT. */
+static bool exti_rearm_or_trigger(void) {
+  static uint32_t retrig_count;
+  exti_rearm();
+  if (!INA301_IsAlertActive()) {
+    retrig_count = 0U;
+    return true;
+  }
+  if (++retrig_count >= EXTI_REARM_RETRIGGER_LIMIT) {
+    retrig_count = 0U;
+    exti_disable();
+    diag_flags |= DIAG_ALERT_STUCK_LOW;
+    fault_cause = (uint8_t)EVENT_ALERT_STUCK_LOW;
+    Storage_UpdateLastEvent(2U, diag_flags);
+    go(ANTISEL_STATE_FAULT);
+    return false;
+  }
+  exti_disable();
+  alarm_t0_us = Acq_Micros();
+  alert_flag = 1U;
+  return true;
+}
 
 static void go(AntiSelState_t s) {
   state = s;
@@ -110,9 +155,9 @@ void AntiSel_Init(void) {
   alert_flag = 0U;
 
   HAL_DAC_Start(&hdac1, DAC_CHANNEL_1);
-  apply_cal();                 /* ina301 cal + programma il DAC */
-  INA301_SetTransparentMode(); /* RESET basso (spec sezione 4) */
-  switch_off();                /* DUT spento fino ai controlli iniziali */
+  apply_cal();            /* ina301 cal + programma il DAC */
+  INA301_ResetLatch();    /* latch pulito all'avvio (modo LATCHED) */
+  switch_off();           /* DUT spento fino ai controlli iniziali */
 
   Acq_Init();  /* TIM2/TIM6 + calibrazione ADC */
   Acq_Start(); /* DMA circolare */
@@ -139,8 +184,9 @@ void AntiSel_Task(void) {
   case ANTISEL_STATE_INIT:
     /* Controlli iniziali completati in AntiSel_Init: abilita DUT e passa IDLE */
     switch_on();
-    exti_rearm();
-    go(ANTISEL_STATE_IDLE);
+    if (exti_rearm_or_trigger()) {
+      go(ANTISEL_STATE_IDLE);
+    }
     break;
 
   case ANTISEL_STATE_IDLE:
@@ -164,12 +210,21 @@ void AntiSel_Task(void) {
     if (c > peak_current_a) {
       peak_current_a = c;
     }
-    if (!INA301_IsAlertActive()) {
-      /* ALERT tornato alto entro T_HOLD -> HCE */
-      go(ANTISEL_STATE_HCE_SAVE);
-    } else if ((uint32_t)(Acq_Micros() - t0_us) >= cfg.t_hold_us) {
-      /* T_HOLD scaduto con ALERT ancora basso -> SEL */
-      go(ANTISEL_STATE_CUTOFF);
+    if ((uint32_t)(Acq_Micros() - t0_us) >= cfg.t_hold_us) {
+      /* Modo LATCHED: ALERT resta basso a prescindere dall'andamento della
+       * corrente durante T_HOLD, quindi la discriminazione HCE/SEL si basa
+       * sulla corrente ADC reale campionata a fine T_HOLD.
+       * NOTA: qui era stata provata una media mobile (Acq_AvgRecent) al
+       * posto del singolo campione, per robustezza al rumore/jitter. Test
+       * di regressione ha mostrato pero' che con la media anche un evento
+       * SEL isolato e pulito (che prima funzionava) viene misclassificato
+       * come HCE in modo ripetuto. Tornato al campione singolo (com'era nei
+       * test funzionanti) finche' non si capisce la causa nella media. */
+      if (c > cfg.current_threshold_a) {
+        go(ANTISEL_STATE_CUTOFF); /* ancora sopra soglia -> SEL */
+      } else {
+        go(ANTISEL_STATE_HCE_SAVE); /* rientrata entro T_HOLD -> HCE */
+      }
     }
     break;
   }
@@ -178,12 +233,14 @@ void AntiSel_Task(void) {
     if (first) {
       Acq_FreezeTrace(ACQ_TRACE_HCE, cfg.t_hold_us, 0U);
       add_event((uint8_t)EVENT_HCE, 0U);
+      INA301_ResetLatch(); /* modo LATCHED: l'evento HCE ha comunque latchato ALERT */
       save_t0_ms = HAL_GetTick();
     }
     /* finestra post-evento, poi riarma e torna in IDLE (nessun power-cycle) */
     if ((uint32_t)(HAL_GetTick() - save_t0_ms) >= cfg.t_clear_ms) {
-      exti_rearm();
-      go(ANTISEL_STATE_IDLE);
+      if (exti_rearm_or_trigger()) {
+        go(ANTISEL_STATE_IDLE);
+      }
     }
     break;
 
@@ -210,8 +267,13 @@ void AntiSel_Task(void) {
   }
 
   case ANTISEL_STATE_RECOVERY:
-    /* DUT spento: dopo l'assestamento, ALERT deve essere alto (nessuna
-     * corrente). Se resta basso -> comparatore/linea bloccati -> FAULT. */
+    /* DUT spento: azzera il latch (modo LATCHED, altrimenti ALERT resta
+     * basso a prescindere dallo stato reale) poi, dopo l'assestamento,
+     * verifica che ALERT sia rimasto alto (nessuna corrente). Se si
+     * ri-latcha -> comparatore/linea bloccati -> FAULT. */
+    if (first) {
+      INA301_ResetLatch();
+    }
     if ((uint32_t)(Acq_Micros() - rec_t0_us) >= cfg.recovery_settle_us) {
       if (INA301_IsAlertActive()) {
         diag_flags |= DIAG_ALERT_STUCK_LOW;
@@ -251,8 +313,9 @@ void AntiSel_Task(void) {
         /* Recupero riuscito. */
         retry_count = 0U;
         Storage_UpdateLastEvent(1U, diag_flags);
-        exti_rearm();
-        go(ANTISEL_STATE_IDLE);
+        if (exti_rearm_or_trigger()) {
+          go(ANTISEL_STATE_IDLE);
+        }
       }
     }
     break;
@@ -292,13 +355,15 @@ AntiSelResult_t AntiSel_ManualOn(void) {
       state == ANTISEL_STATE_RECOVERY || state == ANTISEL_STATE_VERIFY) {
     return ASEL_ERR_BUSY; /* sequenza SEL attiva: non scavalcare */
   }
+  INA301_ResetLatch(); /* modo LATCHED: azzera prima di leggere lo stato reale */
   if (INA301_IsAlertActive()) {
-    return ASEL_ERR_ALERT_LOW; /* sovracorrente presente */
+    return ASEL_ERR_ALERT_LOW; /* sovracorrente presente, si e' ri-latchato subito */
   }
   retry_count = 0U;
   switch_on();
-  exti_rearm();
-  go(ANTISEL_STATE_IDLE);
+  if (exti_rearm_or_trigger()) {
+    go(ANTISEL_STATE_IDLE);
+  }
   return ASEL_OK;
 }
 
@@ -306,14 +371,16 @@ AntiSelResult_t AntiSel_AckFault(void) {
   if (state != ANTISEL_STATE_FAULT) {
     return ASEL_ERR_NOT_IN_FAULT;
   }
+  INA301_ResetLatch(); /* modo LATCHED: azzera prima di leggere lo stato reale */
   if (INA301_IsAlertActive()) {
     return ASEL_ERR_ALERT_LOW;
   }
   retry_count = 0U;
   diag_flags = 0U;
   switch_on();
-  exti_rearm();
-  go(ANTISEL_STATE_IDLE);
+  if (exti_rearm_or_trigger()) {
+    go(ANTISEL_STATE_IDLE);
+  }
   return ASEL_OK;
 }
 
@@ -322,9 +389,10 @@ void AntiSel_ResetSystem(void) {
   diag_flags = 0U;
   Storage_ResetCounters();
   switch_on();
-  INA301_SetTransparentMode();
-  exti_rearm();
-  go(ANTISEL_STATE_IDLE);
+  INA301_ResetLatch();
+  if (exti_rearm_or_trigger()) {
+    go(ANTISEL_STATE_IDLE);
+  }
 }
 
 /* ── Setter config ──────────────────────────────────────────────────────── */

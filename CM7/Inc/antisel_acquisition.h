@@ -15,6 +15,12 @@
 #define ACQ_BUF_SIZE 4000U         /* 40 ms @ 100 kSa/s */
 #define ACQ_PRE_MS 1.0f            /* pre-trigger minimo (spec sezione 6) */
 
+/* Finestra di media usata per la discriminazione HCE/SEL a fine T_HOLD:
+ * un singolo campione istantaneo e' vulnerabile al rumore e al jitter del
+ * polling vicino al confine di T_HOLD, la media su questa finestra e' piu'
+ * robusta pur restando ben dentro il periodo di assestamento atteso. */
+#define ACQ_CLASSIFY_AVG_SAMPLES 30U /* ~300 us @ 100 kSa/s */
+
 /* Tag traccia */
 #define ACQ_TRACE_SEL 1U
 #define ACQ_TRACE_HCE 2U
@@ -26,6 +32,7 @@ bool Acq_Running(void);
 uint32_t Acq_Micros(void);   /* timebase 1 us (TIM2, 32 bit) */
 uint32_t Acq_WritePos(void); /* posizione di scrittura DMA */
 uint16_t Acq_Latest(void);   /* ultimo campione (con invalidate cache) */
+uint16_t Acq_AvgRecent(uint32_t n_samples); /* media degli ultimi N campioni */
 
 /* Congela pre-trigger + finestra evento nel buffer secondario.
  * event_type: ACQ_TRACE_SEL / ACQ_TRACE_HCE. */

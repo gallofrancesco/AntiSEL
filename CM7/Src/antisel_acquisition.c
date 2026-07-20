@@ -76,6 +76,23 @@ uint16_t Acq_Latest(void) {
   return adc_buffer[idx];
 }
 
+uint16_t Acq_AvgRecent(uint32_t n_samples) {
+  if (!adc_running || n_samples == 0U) {
+    return 0U;
+  }
+  if (n_samples > ACQ_BUF_SIZE) {
+    n_samples = ACQ_BUF_SIZE;
+  }
+  uint32_t write_pos = Acq_WritePos();
+  uint32_t start = (write_pos + ACQ_BUF_SIZE - n_samples) % ACQ_BUF_SIZE;
+  SCB_InvalidateDCache_by_Addr((uint32_t *)adc_buffer, sizeof(adc_buffer));
+  uint32_t sum = 0U;
+  for (uint32_t i = 0; i < n_samples; i++) {
+    sum += adc_buffer[(start + i) % ACQ_BUF_SIZE];
+  }
+  return (uint16_t)(sum / n_samples);
+}
+
 void Acq_FreezeTrace(uint8_t event_type, uint32_t thold_us, uint32_t ton_us) {
   if (!adc_running || trace_pending) {
     return; /* best-effort: non sovrascrivere una traccia in corso */

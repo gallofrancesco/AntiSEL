@@ -198,7 +198,7 @@ static void handle_command(struct tcp_pcb *tpcb, char *line) {
     return;
   }
   if (strncmp(line, "INA_RST", 7) == 0) {
-    INA301_SetTransparentMode();
+    INA301_ResetLatch();
     send_str(tpcb, "OK INA_RST\r\n");
     return;
   }

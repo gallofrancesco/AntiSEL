@@ -37,6 +37,25 @@ STATE_NAMES = ["INIT", "IDLE", "ALARM", "HOLD_RUN", "HCE_SAVE", "CUTOFF",
                "TON_RUN", "RECOVERY", "VERIFY", "MANUAL_OFF", "FAULT"]
 SEL_RETRY_MAX = 3
 
+# Spiegazione in chiaro + eventuale azione richiesta per ogni stato della FSM,
+# mostrata accanto a "Stato MCU" cosi' chi guida il test (anche durante
+# l'auto-cycle dell'Arduino) sa cosa aspettarsi e cosa deve fare, senza dover
+# interpretare a memoria la sigla dello stato.
+STATE_HINTS = {
+    "INIT":       ("Inizializzazione firmware in corso.", "gray"),
+    "IDLE":       ("Pronto: DUT alimentato, in attesa di un evento. Nessuna azione richiesta.", "#1a7a1a"),
+    "ALARM":      ("Allarme rilevato: cattura la corrente al trigger (transiente).", "#b35900"),
+    "HOLD_RUN":   ("T_HOLD in corso: classificazione HCE/SEL in base alla corrente ADC.", "#b35900"),
+    "HCE_SAVE":   ("Classificato HCE (nessuno sgancio). Atteso su GUI: HCE +1, SEL invariato.", "#b35900"),
+    "CUTOFF":     ("Classificato SEL: sgancio immediato del DUT.", "#b35900"),
+    "TON_RUN":    ("DUT spento: finestra T_ON prima del tentativo di recupero.", "#b35900"),
+    "RECOVERY":   ("Verifica che la corrente sia rientrata prima di riaccendere il DUT.", "#b35900"),
+    "VERIFY":     ("DUT riacceso: verifica che il guasto non si sia ripresentato.", "#b35900"),
+    "MANUAL_OFF": ("Override manuale: DUT spento su comando esplicito.\nAzione: premi DUT ON per riaccendere.", "#cc0000"),
+    "FAULT":      ("FAULT: retry di recovery esauriti o ALERT bloccato, DUT spento in modo permanente.\n"
+                    "Azione richiesta: premi ACK FAULT (o RESET) per riabilitare.", "#cc0000"),
+}
+
 I_TH_MIN, I_TH_MAX = 1.0, 50.0   # range soglia (R-02)
 
 
@@ -95,6 +114,12 @@ class AntiSELDashboard(ctk.CTk):
         self.trace_x  = []
         self.trace_y  = []
         self.trace_lbl = ""
+        # Innesto degli eventi (traccia ad alta risoluzione) sul grafico
+        # continuo: ogni evento e' un segmento (x,y) in secondi sullo stesso
+        # asse temporale del log 10 Hz, cosi' compare nel punto giusto.
+        self._trace_overlay_acc = []
+        self.trace_overlay_segments = deque(maxlen=20)
+        self.trace_overlay_t0 = None
         self._plot_dirty = False
         self.plot_paused = False
 
@@ -256,6 +281,10 @@ class AntiSELDashboard(ctk.CTk):
         st2 = ctk.CTkFrame(sec, fg_color="transparent"); st2.pack(fill="x")
         self.metric_dac  = self._add_metric(st2, 0, "DAC read", "— counts")
         self.metric_dacv = self._add_metric(st2, 1, "Volt read", "— V")
+        self.lbl_state_hint = ctk.CTkLabel(sec, text="—", text_color="gray",
+                                           justify="left", anchor="w", wraplength=380,
+                                           font=ctk.CTkFont(size=11))
+        self.lbl_state_hint.pack(fill="x", pady=(6, 0))
 
         self._apply_ith()  # inizializza lbl_ith_calc + cur_dac
 
@@ -363,6 +392,7 @@ class AntiSELDashboard(ctk.CTk):
         self.ax_slow.tick_params(labelsize=8)
         (self.line_slow,) = self.ax_slow.plot([], [], color="#2563eb", lw=1.2, label="I")
         (self.line_thr,) = self.ax_slow.plot([], [], color="#cc0000", lw=1.0, ls="--", alpha=0.8, label="soglia (V_LIMIT)")
+        (self.line_slow_trace,) = self.ax_slow.plot([], [], color="#800080", lw=1.3, label="evento (100 kSa/s)")
         self.ax_slow.legend(loc="upper right", fontsize=7)
         self.ax_slow_v = self.ax_slow.twinx()
         self.ax_slow_v.set_ylabel("V [V]", fontsize=8)
@@ -390,10 +420,14 @@ class AntiSELDashboard(ctk.CTk):
         self.slow_t0 = None
         self.trace_x = []; self.trace_y = []
         self._trace_acc = []
+        self.trace_overlay_segments.clear()
+        self._trace_overlay_acc = []
+        self.trace_overlay_t0 = None
         try:
             self.line_slow.set_data([], [])
             self.line_thr.set_data([], [])
             self.line_trace.set_data([], [])
+            self.line_slow_trace.set_data([], [])
             self.canvas.draw_idle()
         except Exception:
             pass
@@ -420,6 +454,19 @@ class AntiSELDashboard(ctk.CTk):
                 if self.slow_t:
                     self.line_slow.set_data(list(self.slow_t), list(self.slow_i))
                     self.line_thr.set_data(list(self.slow_t), list(self.slow_thr))
+                    # Scarta i segmenti-evento usciti dalla finestra visibile del
+                    # log 10 Hz (altrimenti un vecchio evento tiene allargato
+                    # l'asse x anche quando il log corrente e' andato avanti).
+                    t_min = self.slow_t[0]
+                    while self.trace_overlay_segments and self.trace_overlay_segments[0][-1][0] < t_min:
+                        self.trace_overlay_segments.popleft()
+                    ox, oy = [], []
+                    for seg in self.trace_overlay_segments:
+                        if ox:
+                            ox.append(float("nan")); oy.append(float("nan"))
+                        ox.extend(p[0] for p in seg)
+                        oy.extend(p[1] for p in seg)
+                    self.line_slow_trace.set_data(ox, oy)
                     self.ax_slow.relim(); self.ax_slow.autoscale_view()
                     lo, hi = self.ax_slow.get_ylim()
                     k = self._rg_factor()
@@ -634,6 +681,11 @@ class AntiSELDashboard(ctk.CTk):
                         self.trace_active = True
                         self.trace_sample_idx = 0
                         self._trace_acc = []
+                        self._trace_overlay_acc = []
+                        # Ancora l'evento sullo stesso asse temporale (secondi
+                        # dall'inizio) del log 10 Hz, cosi' l'innesto compare
+                        # nel punto giusto sul grafico continuo.
+                        self.trace_overlay_t0 = (time.time() - self.slow_t0) if self.slow_t0 is not None else None
                         _tk = msg.split()
                         self.trace_lbl = _tk[1] if len(_tk) > 1 else "EVT"
                         fields = self._parse_kv(msg)
@@ -662,6 +714,10 @@ class AntiSELDashboard(ctk.CTk):
                             self.trace_x = [pt[0] for pt in self._trace_acc]
                             self.trace_y = [pt[1] for pt in self._trace_acc]
                             self._plot_dirty = True
+                        if self._trace_overlay_acc:
+                            self.trace_overlay_segments.append(self._trace_overlay_acc)
+                            self._trace_overlay_acc = []
+                            self._plot_dirty = True
                         if self.trace_file:
                             self.trace_file.close()
                             self.trace_file = None
@@ -675,6 +731,10 @@ class AntiSELDashboard(ctk.CTk):
                                 i_mA = self._counts_to_mA(adc_raw)
                                 try:
                                     self._trace_acc.append((time_us, float(i_mA)))
+                                    if self.trace_overlay_t0 is not None:
+                                        self._trace_overlay_acc.append(
+                                            (self.trace_overlay_t0 + time_us / 1e6, float(i_mA))
+                                        )
                                 except ValueError:
                                     pass
                                 if self.trace_file:
@@ -764,6 +824,8 @@ class AntiSELDashboard(ctk.CTk):
         else:
             color = "black"
         self.metric_state.configure(text=name, text_color=color)
+        hint_text, hint_color = STATE_HINTS.get(name, ("—", "gray"))
+        self.lbl_state_hint.configure(text=hint_text, text_color=hint_color)
         if retry is not None:
             try:
                 nmax = int(self.retry_max.get())

@@ -59,15 +59,24 @@ bool INA301_IsAlertActive(void) {
           GPIO_PIN_RESET);
 }
 
-void INA301_SetTransparentMode(void) {
-  /* RESET basso: il comparatore segue VOUT>VLIMIT in tempo reale (spec s.4). */
+void INA301_ResetLatch(void) {
+  /* Impulso di reset del latch INA301: LOW poi HIGH (ri-arma in modo
+   * LATCHED). Il pull basso momentaneo azzera il latch; il ritorno alto
+   * ri-arma il comparatore: se la corrente e' ancora sopra soglia l'ALERT
+   * si ri-asserisce (si latcha di nuovo) immediatamente.
+   * Larghezza impulso via NOP (non Acq_Micros/TIM2: non ancora avviato
+   * quando questa funzione e' chiamata durante l'init). */
   HAL_GPIO_WritePin(INA301_RST_GPIO_Port, INA301_RST_Pin, GPIO_PIN_RESET);
+  for (volatile uint32_t i = 0; i < 500U; i++) {
+    __NOP();
+  }
+  HAL_GPIO_WritePin(INA301_RST_GPIO_Port, INA301_RST_Pin, GPIO_PIN_SET);
 }
 
 bool INA301_ResetAndVerify(void) {
-  /* In transparent mode non c'e' un latch da azzerare: si garantisce RESET
-   * basso, si attende un assestamento e si verifica che ALERT sia inattivo. */
-  INA301_SetTransparentMode();
+  /* Azzera il latch, attende un assestamento e verifica che ALERT sia
+   * tornato inattivo (nessuna corrente sopra soglia al momento del test). */
+  INA301_ResetLatch();
   for (volatile uint32_t i = 0; i < 5000U; i++) {
     __NOP();
   }
