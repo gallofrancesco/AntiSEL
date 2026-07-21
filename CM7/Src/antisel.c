@@ -211,19 +211,15 @@ void AntiSel_Task(void) {
       peak_current_a = c;
     }
     
-    /* MODIFICA ROBUSTA: Se la corrente scende sotto la soglia *PRIMA* della fine di 
-     * T_HOLD, significa che l'evento e' un transiente temporaneo rientrato.
-     * Questa logica continua e' immune ai jitter di campionamento o ritardi
-     * fisici sul segnale DAC. */
-    if (c <= cfg.current_threshold_a) {
-      go(ANTISEL_STATE_HCE_SAVE); /* rientrata entro T_HOLD -> HCE */
-      break;
-    }
-
-    /* Se arriviamo alla fine di T_HOLD e la corrente non e' mai scesa sotto soglia,
-     * allora l'evento e' persistente -> SEL */
+    /* Attendiamo la fine della finestra T_HOLD per valutare l'evento. 
+     * In questo modo diamo tempo all'ADC di campionare l'intero impulso
+     * e alla traccia di riempirsi con i dati corretti. */
     if ((uint32_t)(Acq_Micros() - t0_us) >= cfg.t_hold_us) {
-      go(ANTISEL_STATE_CUTOFF); /* ancora sopra soglia -> SEL */
+      if (c > cfg.current_threshold_a) {
+        go(ANTISEL_STATE_CUTOFF); /* ancora sopra soglia a fine T_HOLD -> SEL */
+      } else {
+        go(ANTISEL_STATE_HCE_SAVE); /* rientrata sotto soglia entro T_HOLD -> HCE */
+      }
     }
     break;
   }
