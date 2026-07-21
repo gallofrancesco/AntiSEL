@@ -215,7 +215,8 @@ void AntiSel_Task(void) {
      * In questo modo diamo tempo all'ADC di campionare l'intero impulso
      * e alla traccia di riempirsi con i dati corretti. */
     if ((uint32_t)(Acq_Micros() - t0_us) >= cfg.t_hold_us) {
-      if (c > cfg.current_threshold_a) {
+      float c_end = INA301_AdcToCurrent(Acq_AvgRecent(10));
+      if (c_end > cfg.current_threshold_a) {
         go(ANTISEL_STATE_CUTOFF); /* ancora sopra soglia a fine T_HOLD -> SEL */
       } else {
         go(ANTISEL_STATE_HCE_SAVE); /* rientrata sotto soglia entro T_HOLD -> HCE */
