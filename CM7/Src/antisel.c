@@ -210,21 +210,20 @@ void AntiSel_Task(void) {
     if (c > peak_current_a) {
       peak_current_a = c;
     }
+    
+    /* MODIFICA ROBUSTA: Se la corrente scende sotto la soglia *PRIMA* della fine di 
+     * T_HOLD, significa che l'evento e' un transiente temporaneo rientrato.
+     * Questa logica continua e' immune ai jitter di campionamento o ritardi
+     * fisici sul segnale DAC. */
+    if (c <= cfg.current_threshold_a) {
+      go(ANTISEL_STATE_HCE_SAVE); /* rientrata entro T_HOLD -> HCE */
+      break;
+    }
+
+    /* Se arriviamo alla fine di T_HOLD e la corrente non e' mai scesa sotto soglia,
+     * allora l'evento e' persistente -> SEL */
     if ((uint32_t)(Acq_Micros() - t0_us) >= cfg.t_hold_us) {
-      /* Modo LATCHED: ALERT resta basso a prescindere dall'andamento della
-       * corrente durante T_HOLD, quindi la discriminazione HCE/SEL si basa
-       * sulla corrente ADC reale campionata a fine T_HOLD.
-       * NOTA: qui era stata provata una media mobile (Acq_AvgRecent) al
-       * posto del singolo campione, per robustezza al rumore/jitter. Test
-       * di regressione ha mostrato pero' che con la media anche un evento
-       * SEL isolato e pulito (che prima funzionava) viene misclassificato
-       * come HCE in modo ripetuto. Tornato al campione singolo (com'era nei
-       * test funzionanti) finche' non si capisce la causa nella media. */
-      if (c > cfg.current_threshold_a) {
-        go(ANTISEL_STATE_CUTOFF); /* ancora sopra soglia -> SEL */
-      } else {
-        go(ANTISEL_STATE_HCE_SAVE); /* rientrata entro T_HOLD -> HCE */
-      }
+      go(ANTISEL_STATE_CUTOFF); /* ancora sopra soglia -> SEL */
     }
     break;
   }
