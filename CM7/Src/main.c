@@ -121,7 +121,11 @@ int main(void)
   /* USER CODE END Init */
 
   /* Configure the system clock */
-  SystemClock_Config();
+  /* NOTA: chiamare la variante 480 MHz, non SystemClock_Config() (75 MHz).
+   * Questa riga e' fuori dai blocchi USER CODE: una "Generate Code" da
+   * CubeMX la resetta a SystemClock_Config() senza avvisare -- ripristinare
+   * SystemClock_Config_480MHz() a mano dopo ogni rigenerazione. */
+  SystemClock_Config_480MHz();
 /* USER CODE BEGIN Boot_Mode_Sequence_2 */
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
   __HAL_RCC_HSEM_CLK_ENABLE();
