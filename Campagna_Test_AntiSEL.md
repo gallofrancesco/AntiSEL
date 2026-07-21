@@ -159,6 +159,7 @@ Legenda esito: ☐ non eseguito · ✔ pass · ✘ fail (annotare).
 | T6.4 | §5.3 | Verifica CSV eventi (override, cambi parametro, tracce) | riga per ogni comando con timestamp | ☐ |
 | T6.5 | — | Pulsanti Pausa / Azzera dei grafici | Pausa congela, Azzera svuota; i dati riprendono dopo | ☐ |
 | T6.6 | R-05/§4.3 | (Setup A) lancia `a` (auto-cycle) per almeno 10 cicli completi, intervenendo dalla GUI a ogni `PERMANENT_OFF`; poi analizza offline i CSV `_log10hz`/`_trace_*` | ogni HCE classificato senza sgancio, ogni SEL recuperabile senza PERMANENT_OFF, ogni corto persistente in PERMANENT_OFF esattamente all'N-esimo retry configurato; nessuna classificazione scambiata tra i cicli | ☐ |
+| T6.7 | — | Osserva il campo suggerimento sotto "Stato MCU" durante gli eventi (HCE, SEL). | Il testo in chiaro corrisponde allo stato attuale e fornisce le corrette istruzioni (es. "Azione richiesta: premi ACK FAULT"). | ☐ |
 
 ### G7 — Override manuale e sicurezza (R-07)
 
@@ -174,6 +175,7 @@ Legenda esito: ☐ non eseguito · ✔ pass · ✘ fail (annotare).
 | T8.1 | — | Stacca il cavo Ethernet durante un run | GUI rileva "Connessione persa", chiusura pulita | ☐ |
 | T8.2 | — | Raffica di comandi rapidi (slider I_TH) | nessuna perdita di sync; DAC coerente | ☐ |
 | T8.3 | — | Eventi ravvicinati (traccia in invio) | comportamento best-effort documentato; contatori corretti | ☐ |
+| T8.4 | — | Forza manualmente il pin ALARM (PE13) a GND senza indurre sovracorrente su PA3. | Dopo 5 riarmi falliti consecutivi, il sistema va in FAULT (PERMANENT_OFF) con diagnostica `ALERT_STUCK_LOW`. | ☐ |
 
 ### G9 — Diagnostica pre-campagna (anomalie da chiudere prima di G4/G5)
 
@@ -184,7 +186,7 @@ due esiti attesi non si verifica, non procedere con la campagna finché non è c
 | ID | Passi | Atteso | Esito |
 |---|---|---|---|
 | T9.1 | Con DUT **OFF** (`SWITCH OFF` manuale, nessun evento in corso), osserva `ADC=`/`I_MA=` nel log 10 Hz per almeno 10 righe consecutive | il valore **non** deve restare identico bit-per-bit riga dopo riga per decine di secondi con lo stesso identico conteggio ADC; un minimo jitter di quantizzazione è normale. Se resta perfettamente congelato → sospetta acquisizione DMA bloccata: verificare `Acq_Running()`/riavviare `Acq_Start()`, non fidarsi delle letture finché non si risolve | ☐ |
-| T9.2 | Genera un SEL che fallisce **un solo** retry prima di recuperare (es. soglia vicina al livello emulato) e conta l'incremento di `SEL=` sulla GUI | **anomalia già nota, non bloccante**: `SEL=` si incrementa **una volta per ogni tentativo di power-cycle** (ogni rientro in `TON_RUN`), non una sola volta per evento fisico come da intento originale della patch (`Patch_INA301_Latched.md` §"Note"). Se serve il conteggio "un evento = un incremento" per la cross-section, va corretto in `antisel.c` prima della campagna con fascio (§5) | ☐ |
+| T9.2 | Genera un SEL che fallisce **un solo** retry prima di recuperare e conta l'incremento di `SEL=` sulla GUI | `SEL=` si incrementa **una sola volta** per l'intero evento fisico, a prescindere dal numero di retry necessari per recuperare (verifica fix anomalia conteggio). | ☐ |
 | T9.3 | Durante un test `p` (corto persistente) con DUT `SWITCH OFF` da almeno 5 secondi, controlla sul Serial Monitor Arduino (`m`) il campo `Switch:` | deve leggere `OFF` — se l'Arduino vede ancora `ON` mentre la Nucleo ha già aperto lo switch, il problema è nel cablaggio D2↔PG14 (non nel firmware Nucleo) | ☐ |
 
 ---

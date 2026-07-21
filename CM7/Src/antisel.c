@@ -259,7 +259,9 @@ void AntiSel_Task(void) {
     if ((uint32_t)(Acq_Micros() - t0_us) >= cfg.t_on_us) {
       /* Traccia SEL completa (pre + T_HOLD + T_ON). DUT resta spento. */
       Acq_FreezeTrace(ACQ_TRACE_SEL, cfg.t_hold_us, cfg.t_on_us);
-      add_event((uint8_t)EVENT_SEL, 0U); /* incrementa SEL una sola volta */
+      if (retry_count == 0U) {
+        add_event((uint8_t)EVENT_SEL, 0U); /* incrementa SEL una sola volta */
+      }
       rec_t0_us = Acq_Micros();
       go(ANTISEL_STATE_RECOVERY);
     }
