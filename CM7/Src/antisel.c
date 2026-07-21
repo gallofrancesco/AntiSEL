@@ -216,10 +216,12 @@ void AntiSel_Task(void) {
      * e alla traccia di riempirsi con i dati corretti. */
     if ((uint32_t)(Acq_Micros() - t0_us) >= cfg.t_hold_us) {
       float c_end = INA301_AdcToCurrent(Acq_AvgRecent(10));
-      if (c_end > cfg.current_threshold_a) {
-        go(ANTISEL_STATE_CUTOFF); /* ancora sopra soglia a fine T_HOLD -> SEL */
+      /* SEL: la corrente rimane sopra soglia E persisto vicino al picco (>= 60% del picco).
+       * HCE: la corrente e scesa o sta decadendo significativamente rispetto al picco. */
+      if (c_end > cfg.current_threshold_a && c_end >= (0.60f * peak_current_a)) {
+        go(ANTISEL_STATE_CUTOFF); /* ancora sopra soglia e persistente a fine T_HOLD -> SEL */
       } else {
-        go(ANTISEL_STATE_HCE_SAVE); /* rientrata sotto soglia entro T_HOLD -> HCE */
+        go(ANTISEL_STATE_HCE_SAVE); /* rientrata o decaduta entro T_HOLD -> HCE */
       }
     }
     break;
