@@ -1,12 +1,14 @@
 #MicroXplorer Configuration settings - do not modify
 ADC1.Channel-1\#ChannelRegularConversion=ADC_CHANNEL_15
-ADC1.ContinuousConvMode=ENABLE
-ADC1.IPParameters=Rank-1\#ChannelRegularConversion,master,Channel-1\#ChannelRegularConversion,SamplingTime-1\#ChannelRegularConversion,OffsetNumber-1\#ChannelRegularConversion,OffsetSignedSaturation-1\#ChannelRegularConversion,NbrOfConversionFlag,ContinuousConvMode
+ADC1.ContinuousConvMode=DISABLE
+ADC1.ExternalTrigConv=ADC_EXTERNALTRIG_T6_TRGO
+ADC1.ExternalTrigConvEdge=ADC_EXTERNALTRIGCONVEDGE_RISING
+ADC1.IPParameters=Rank-1\#ChannelRegularConversion,master,Channel-1\#ChannelRegularConversion,SamplingTime-1\#ChannelRegularConversion,OffsetNumber-1\#ChannelRegularConversion,OffsetSignedSaturation-1\#ChannelRegularConversion,NbrOfConversionFlag,ContinuousConvMode,ExternalTrigConv,ExternalTrigConvEdge
 ADC1.NbrOfConversionFlag=1
 ADC1.OffsetNumber-1\#ChannelRegularConversion=ADC_OFFSET_NONE
 ADC1.OffsetSignedSaturation-1\#ChannelRegularConversion=DISABLE
 ADC1.Rank-1\#ChannelRegularConversion=1
-ADC1.SamplingTime-1\#ChannelRegularConversion=ADC_SAMPLETIME_1CYCLE_5
+ADC1.SamplingTime-1\#ChannelRegularConversion=ADC_SAMPLETIME_8CYCLES_5
 ADC1.master=1
 BSP_IP_NAME=NUCLEO-H755ZI-Q
 CAD.formats=
