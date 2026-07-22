@@ -297,6 +297,12 @@ void SystemClock_Config_480MHz(void) {
   while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {
   }
 
+  /* HSE = MCO del ST-LINK: al power-on a freddo l'uscita del probe puo'
+   * non essere ancora stabile nell'istante in cui la PLL ci si aggancia
+   * (HSERDY in bypass non verifica la qualita' del segnale). Margine
+   * prima dell'aggancio + un paio di tentativi come rete di sicurezza. */
+  HAL_Delay(50);
+
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -309,8 +315,19 @@ void SystemClock_Config_480MHz(void) {
   RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_1;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
   RCC_OscInitStruct.PLL.PLLFRACN = 0;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
-    Error_Handler();
+  {
+    uint32_t attempts_left = 3;
+    HAL_StatusTypeDef osc_status;
+    do {
+      osc_status = HAL_RCC_OscConfig(&RCC_OscInitStruct);
+      if (osc_status == HAL_OK) {
+        break;
+      }
+      HAL_Delay(50);
+    } while (--attempts_left > 0);
+    if (osc_status != HAL_OK) {
+      Error_Handler();
+    }
   }
 
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
