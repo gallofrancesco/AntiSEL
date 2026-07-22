@@ -384,7 +384,12 @@ AntiSelResult_t AntiSel_AckFault(void) {
   return ASEL_OK;
 }
 
-void AntiSel_ResetSystem(void) {
+AntiSelResult_t AntiSel_ResetSystem(void) {
+  if (state == ANTISEL_STATE_ALARM || state == ANTISEL_STATE_HOLD_RUN ||
+      state == ANTISEL_STATE_CUTOFF || state == ANTISEL_STATE_TON_RUN ||
+      state == ANTISEL_STATE_RECOVERY || state == ANTISEL_STATE_VERIFY) {
+    return ASEL_ERR_BUSY; /* sequenza SEL attiva: non scavalcare */
+  }
   retry_count = 0U;
   diag_flags = 0U;
   Storage_ResetCounters();
@@ -393,6 +398,7 @@ void AntiSel_ResetSystem(void) {
   if (exti_rearm_or_trigger()) {
     go(ANTISEL_STATE_IDLE);
   }
+  return ASEL_OK;
 }
 
 /* ── Setter config ──────────────────────────────────────────────────────── */

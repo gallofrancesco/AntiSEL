@@ -56,7 +56,7 @@ void AntiSel_OnAlertISR(void); /* chiamata dalla EXTI callback */
 AntiSelResult_t AntiSel_ManualOff(void); /* override OFF, massima priorita' */
 AntiSelResult_t AntiSel_ManualOn(void);  /* non scavalca SEL/FAULT/ALERT */
 AntiSelResult_t AntiSel_AckFault(void);
-void AntiSel_ResetSystem(void); /* azzera contatori e riarma */
+AntiSelResult_t AntiSel_ResetSystem(void); /* azzera contatori e riarma */
 
 /* Setter config (validano; ASEL_OK oppure ASEL_ERR_RANGE) */
 AntiSelResult_t AntiSel_SetGain(float v);

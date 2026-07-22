@@ -193,8 +193,8 @@ static void handle_command(struct tcp_pcb *tpcb, char *line) {
     return;
   }
   if (strncmp(line, "RESET", 5) == 0) {
-    AntiSel_ResetSystem();
-    send_str(tpcb, "OK RESET\r\n");
+    AntiSelResult_t r = AntiSel_ResetSystem();
+    send_str(tpcb, r == ASEL_OK ? "OK RESET\r\n" : err_str(r));
     return;
   }
   if (strncmp(line, "INA_RST", 7) == 0) {
