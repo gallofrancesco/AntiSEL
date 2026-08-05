@@ -6,7 +6,7 @@ Applicare in STM32CubeIDE e ricompilare il core **CM7**. Non compilato in questa
 ## Progetto
 
 - **INA301 in modo latched**: l'ALERT resta basso finché non si pulsa il pin RESET.
-- Nuovo pin **`INA301_RST` = PE14** (Arduino **D4**, CN10 pin 8), output push-pull,
+- Nuovo pin **`INA301_RST` = PE14** (CN10 pin 8), output push-pull,
   **a riposo HIGH = latched**; impulso **LOW ~5 µs** per azzerare il latch.
 - **Discriminazione HCE/SEL via ADC** (l'ALERT latchato non è più indicativo): a fine
   T_HOLD si confronta la corrente ADC con la soglia (dal DAC).
@@ -39,7 +39,7 @@ Nella `MX_GPIO_Init`, dopo il write iniziale di LD2 aggiungere il livello di rip
 Dopo il blocco di configurazione di `INA301_ALERT_Pin` aggiungere:
 
 ```c
-  /*Configure GPIO pin : INA301_RST_Pin (PE14 = Arduino D4) */
+  /*Configure GPIO pin : INA301_RST_Pin (PE14) */
   GPIO_InitStruct.Pin = INA301_RST_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -236,7 +236,7 @@ l'ALARM (PE13): serve anche imporre la **corrente** sull'ingresso ADC **PA3**
 - **PA3** (livello analogico 0–3,3 V) decide la classificazione a fine T_HOLD:
   sopra soglia = SEL, sotto = HCE; e in COOLDOWN se resta alta = corto persistente.
 
-Quindi l'emulatore Arduino deve pilotare **entrambi**: impulso su PE13 + livello su PA3
+Quindi l'emulatore INA301 deve pilotare **entrambi**: impulso su PE13 + livello su PA3
 (via DAC o PWM+RC+partitore ≤3,3 V). Un SEL "recuperabile" = PA3 alta durante T_HOLD/T_ON
 poi bassa; un **corto persistente** = PA3 alta anche dopo il power-cycle (→ dopo N → PERMANENT_OFF).
 
