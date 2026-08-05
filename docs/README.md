@@ -24,5 +24,4 @@ istruzioni di build vedi il [README principale](../README.md).
 | [AntiSEL_Matrice_Tracciabilita.md](AntiSEL_Matrice_Tracciabilita.md) | Matrice requisito → modulo firmware → funzione → periferica → test |
 | [AntiSEL_Protocollo_Comandi.md](AntiSEL_Protocollo_Comandi.md) | Protocollo TCP (comandi, messaggi asincroni, formati file CSV) |
 | [Mappatura_Pin_AntiSEL.md](Mappatura_Pin_AntiSEL.md) | Assegnazione pin STM32 / connettori NUCLEO-H755ZI-Q |
-| [Patch_INA301_Latched.md](Patch_INA301_Latched.md) | Note di progetto sul modo latched dell'INA301 e sulla policy di riarmo |
 | [ina301.pdf](ina301.pdf) | Datasheet del componente INA301 |
