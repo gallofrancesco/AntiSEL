@@ -25,3 +25,4 @@ istruzioni di build vedi il [README principale](../README.md).
 | [AntiSEL_Protocollo_Comandi.md](AntiSEL_Protocollo_Comandi.md) | Protocollo TCP (comandi, messaggi asincroni, formati file CSV) |
 | [Mappatura_Pin_AntiSEL.md](Mappatura_Pin_AntiSEL.md) | Assegnazione pin STM32 / connettori NUCLEO-H755ZI-Q |
 | [ina301.pdf](ina301.pdf) | Datasheet del componente INA301 |
+| [Proposta_FrontEnd_LowNoise_ADC_Isolato.md](Proposta_FrontEnd_LowNoise_ADC_Isolato.md) | Proposta (non implementata) di front-end a basso rumore con ADC esterno isolato (AD7176-2, alternative AD7124-8/ADS1262) |
